@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(LiteIME VERSION 0.1.0 LANGUAGES CXX)
+project(LiteIME VERSION 0.1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,7 @@ add_library(LiteIME64 SHARED
     src/tsf/composition.cpp
     src/tsf/text_service.cpp
     src/tsf/LiteIME.def
+    src/tsf/liteime_tsf.rc
 )
 set_target_properties(LiteIME64 PROPERTIES
     PREFIX ""
@@ -64,6 +65,7 @@ add_executable(LiteIMEHost WIN32
     src/host/status_window.cpp
     src/host/tray_icon.cpp
     src/host/quick_input_dialog.cpp
+    src/host/liteime_host.rc
 )
 target_include_directories(LiteIMEHost PRIVATE src)
 target_link_libraries(LiteIMEHost PRIVATE
