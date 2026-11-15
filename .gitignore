@@ -1,0 +1,22 @@
+# Build outputs & deploy binaries
+build/
+dist/
+*.old.*
+*.pdb
+*.tmp
+.cache/
+.vs/
+.vscode/
+__pycache__/
+
+# Compiled binary dictionaries & downloaded third-party raw sources
+# (Regenerated locally via scripts/fetch_and_compile_dict.py, build_common_en_pack.py, build_domain_packs.py)
+data/*.dict
+data/packs/
+data/raw/
+data/packs_raw/*.yaml
+data/packs_raw/THUOCL_*
+
+# Local multi-agent code review scratch notes
+ARGON_REVIEW_REPORT.md
+REVIEW_FOR_ARGON.md
