@@ -274,14 +274,20 @@ void BilingualEngine::rebuildCandidates() {
                     double sc = 240.0 + static_cast<double>(uEntry.count) * 4.0;
                     addScored(uEntry.word, "", uKey, rawBuffer_.size(), sc, CandidateKind::ChineseJianpin, 88, tier);
                 }
-            } else if (!anyPartial && initials.size() >= 2) {
-                // Loose initial match (e.g. wulu -> wl -> 未来 (weilai)): strictly below exact & fuzzy, never learned.
-                auto jpHits = queryJianpinAll(initials, 5);
+            } else if (config_.looseInitialMatch && !anyPartial && initials.size() >= 2) {
+                // Optional extension (OFF by default): at most 2 ultra-high-frequency loose-initial
+                // words (e.g. wulu -> wl -> 未来 (weilai)), excluding exact-pinyin duplicates & rare words.
+                constexpr uint32_t kLooseInitialMinFreq = 40000;
+                auto jpHits = queryJianpinAll(initials, 20);
+                size_t looseAdded = 0;
                 for (const auto& h : jpHits) {
+                    if (h.freq < kLooseInitialMinFreq) continue;
+                    if (h.pinyin == fullKey) continue;
                     if (detail::countSyllablesInPinyin(h.pinyin) > tokCount) continue;
                     std::string hint = "(" + detail::formatPinyinConcat(h.pinyin) + ")";
                     double sc = 240.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0;
                     addScored(h.word, std::move(hint), "", rawBuffer_.size(), sc, CandidateKind::LooseInitial, 66, 0);
+                    if (++looseAdded >= 2) break;
                 }
             }
         }
@@ -338,6 +344,9 @@ void BilingualEngine::rebuildCandidates() {
                     : std::string{};
 
                 if (anyPartialPrefix) {
+                    if (pIdx != 0) {
+                        continue; // Never let alternate broken splits (e.g. "w"+"ei"+"bi") inject fake Jianpin ("we")
+                    }
                     const bool prefixAllShort = (len <= 4) && std::all_of(
                         path.tokens.begin(), path.tokens.begin() + len,
                         [](const SyllableToken& t) { return t.text.size() <= 2; });
@@ -406,6 +415,9 @@ void BilingualEngine::rebuildCandidates() {
             // 3f. First-syllable single characters (capped to 1 syllable when raw has 1 token e.g. 'w')
             if (!path.tokens.empty()) {
                 const auto& firstTok = path.tokens[0];
+                if (pIdx > 0 && (firstTok.isPartial || firstTok.text == bestPath.tokens[0].text)) {
+                    continue;
+                }
                 const size_t firstBytes = firstTok.start + firstTok.length;
                 const int singleGroup = (tokCount == 1 && !hasFullExactChinese && !hasFuzzyMatches) ? 90 : 60;
                 if (!firstTok.isPartial) {
@@ -423,7 +435,7 @@ void BilingualEngine::rebuildCandidates() {
                     }
                     if (scored.size() < 5) {
                         for (const auto& h : queryPinyinPrefixAll(firstTok.text, 20)) {
-                            if (detail::countSyllablesInPinyin(h.pinyin) > tokCount) continue;
+                            if (detail::countSyllablesInPinyin(h.pinyin) != 1) continue;
                             double sc = 60.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0 - pathPenalty;
                             addScored(h.word, "", h.pinyin, firstBytes, sc, CandidateKind::ChinesePhrase,
                                       singleGroup, userDict_.getTier(h.pinyin, h.word));

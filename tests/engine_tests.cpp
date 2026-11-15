@@ -94,6 +94,16 @@ std::filesystem::path buildFixtureDict(const std::filesystem::path& dir) {
         {"青年", "qing nian", 30000, 2},
         {"请你", "qing ni", 20000, 2},
         {"请您", "qing nin", 15000, 2},
+        {"为", "wei", 50000, 1},
+        {"必", "bi", 30000, 1},
+        {"未必", "wei bi", 140000, 2},
+        {"我不", "wo bu", 500000, 2},
+        {"外部", "wai bu", 410000, 2},
+        {"文本", "wen ben", 400000, 2},
+        {"无病", "wu bing", 15000, 2},
+        {"王二", "wang er", 13000, 2},
+        {"为恶", "wei e", 7500, 2},
+        {"婉儿", "wan er", 8000, 2},
     };
     std::vector<RawEnglishRecord> english = {
         {"python", "Python", 50000},
@@ -392,11 +402,24 @@ int wmain() {
         CHECK(!eng.isComposing());
     }
 
-    // 10. Fuzzy r<->l ('wulu' -> 侮辱 (wu'ru)) strictly after exact ('五路/无路/无卤'), and loose initial ('未来 (weilai)')
+    // 10. Fuzzy r<->l ('wulu' -> 侮辱 (wu'ru)) strictly after exact ('五路/无路/无卤');
+    //     LooseInitial ('未来 (weilai)') is OFF by default and capped at <= 2 ultra-high-freq items when enabled.
     {
         BilingualEngine eng;
         eng.setDictionary(&dict);
+        CHECK(eng.config().looseInitialMatch == false);
         eng.config().fuzzy.r_l = true;
+        typeWord(eng, "wulu");
+        auto hasText = [&](const std::string& w) {
+            for (const auto& c : eng.allCandidates()) {
+                if (c.text == w) return true;
+            }
+            return false;
+        };
+        CHECK(!hasText("未来")); // Default OFF
+        eng.handleKey(0x1B, 0, false);
+
+        eng.config().looseInitialMatch = true;
         typeWord(eng, "wulu");
         const auto& all = eng.allCandidates();
         auto idxOf = [&](const std::string& w) -> int {
@@ -1006,6 +1029,51 @@ int wmain() {
         typeWord(eng, "pYthon");
         CHECK(eng.formattedHeader() == "pYthon");
         eng.handleKey(0x1B, 0, false);
+    }
+
+    // 24. wei'bi / weibi never leaks bogus secondary "we" Jianpin ("王二"/"为恶"/"婉儿"), and LooseInitial respects OFF default & <= 2 high-freq cap
+    {
+        BilingualEngine eng;
+        eng.setDictionary(&dict);
+        CHECK(eng.config().looseInitialMatch == false);
+
+        typeWord(eng, "wei'bi");
+        auto checkNoGarbage = [&]() {
+            for (const auto& c : eng.allCandidates()) {
+                CHECK(c.text != "王二");
+                CHECK(c.text != "为恶");
+                CHECK(c.text != "婉儿");
+                CHECK(c.text != "无病");
+            }
+        };
+        checkNoGarbage();
+        for (const auto& c : eng.allCandidates()) {
+            CHECK(c.kind != CandidateKind::LooseInitial);
+        }
+        eng.handleKey(0x1B, 0, false);
+
+        eng.config().looseInitialMatch = true;
+        typeWord(eng, "weibi");
+        checkNoGarbage();
+        size_t looseCount = 0;
+        for (const auto& c : eng.allCandidates()) {
+            if (c.kind == CandidateKind::LooseInitial) {
+                ++looseCount;
+                CHECK(c.text == "我不" || c.text == "外部" || c.text == "文本");
+            }
+        }
+        CHECK(looseCount == 2);
+        eng.handleKey(0x1B, 0, false);
+
+        EngineConfig cfgOut;
+        CHECK(cfgOut.looseInitialMatch == false);
+        cfgOut.looseInitialMatch = true;
+        auto tmpCfg = std::filesystem::temp_directory_path() / "liteime_loose_cfg.ini";
+        CHECK(UserDict::saveConfig(tmpCfg, cfgOut));
+        EngineConfig cfgIn;
+        CHECK(UserDict::loadConfig(tmpCfg, cfgIn));
+        CHECK(cfgIn.looseInitialMatch == true);
+        std::filesystem::remove(tmpCfg);
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

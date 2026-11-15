@@ -490,6 +490,9 @@ struct HostApp {
                 case liteime::host::HostAction::ToggleTypoCorrection:
                     cfg.typoCorrection = !cfg.typoCorrection;
                     break;
+                case liteime::host::HostAction::ToggleLooseInitial:
+                    cfg.looseInitialMatch = !cfg.looseInitialMatch;
+                    break;
                 case liteime::host::HostAction::TogglePackComputer:
                     cfg.enableCsPack = !cfg.enableCsPack;
                     needReloadExtra = true;

@@ -275,6 +275,9 @@ void TrayIcon::showContextMenu(const EngineConfig& cfg) {
         AppendMenuW(fuzzyMenu, MF_STRING | (cfg.typoCorrection ? MF_CHECKED : 0),
                     static_cast<UINT_PTR>(HostAction::ToggleTypoCorrection),
                     L"\u660e\u663e\u9519\u62fc\u81ea\u52a8\u7ea0\u6b63 (zhogn/zhog -> zhong)");
+        AppendMenuW(fuzzyMenu, MF_STRING | (cfg.looseInitialMatch ? MF_CHECKED : 0),
+                    static_cast<UINT_PTR>(HostAction::ToggleLooseInitial),
+                    L"\u5168\u62fc\u9644\u5e26\u9996\u5b57\u6bcd\u9ad8\u9891\u8bcd (\u6700\u591a2\u4e2a\uff0c\u9ed8\u8ba4\u5173\u95ed)");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fuzzyMenu), L"\u6a21\u7cca\u97f3\u4e0e\u7ea0\u9519\u8bbe\u7f6e");
     }
 

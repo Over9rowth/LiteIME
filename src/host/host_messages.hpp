@@ -44,6 +44,7 @@ enum class HostAction : WPARAM {
     SetPreeditNone = 36,
     ToggleMixedEnglish = 37,
     TogglePackCommonEn = 38,
+    ToggleLooseInitial = 39,
 };
 
 inline UINT queryDpiForWindow(HWND hwnd) {

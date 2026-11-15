@@ -416,6 +416,7 @@ bool UserDict::loadConfig(const std::filesystem::path& path, EngineConfig& cfg) 
         else if (k == "chinesePunct") cfg.chinesePunct = asBool(v);
         else if (k == "mixedEnglish") cfg.mixedEnglish = asBool(v);
         else if (k == "typoCorrection") cfg.typoCorrection = asBool(v);
+        else if (k == "looseInitialMatch") cfg.looseInitialMatch = asBool(v);
         else if (k == "enableCsPack") cfg.enableCsPack = asBool(v);
         else if (k == "enableExtPack") cfg.enableExtPack = asBool(v);
         else if (k == "enableProPack") cfg.enableProPack = asBool(v);
@@ -460,6 +461,7 @@ bool UserDict::saveConfig(const std::filesystem::path& path, const EngineConfig&
         << "chinesePunct=" << b(cfg.chinesePunct) << '\n'
         << "mixedEnglish=" << b(cfg.mixedEnglish) << '\n'
         << "typoCorrection=" << b(cfg.typoCorrection) << '\n'
+        << "looseInitialMatch=" << b(cfg.looseInitialMatch) << '\n'
         << "enableCsPack=" << b(cfg.enableCsPack) << '\n'
         << "enableExtPack=" << b(cfg.enableExtPack) << '\n'
         << "enableProPack=" << b(cfg.enableProPack) << '\n'

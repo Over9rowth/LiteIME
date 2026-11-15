@@ -50,6 +50,7 @@ struct EngineConfig {
     int statusPosX = -10000;       // persisted floating pill X (-10000 = unset/default)
     int statusPosY = -10000;       // persisted floating pill Y (-10000 = unset/default)
     bool typoCorrection = true;    // auto-correct obvious pinyin typos (zhogn/zhog -> zhong)
+    bool looseInitialMatch = false; // allow up to 2 ultra-high-freq loose initial matches on full pinyin (OFF by default)
     bool enableCsPack = false;     // optional domain pack: computer.dict (OFF by default)
     bool enableExtPack = false;    // optional domain pack: ext_cn.dict (OFF by default)
     bool enableProPack = false;    // optional domain pack: pro_fields.dict (OFF by default)
