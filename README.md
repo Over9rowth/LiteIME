@@ -41,6 +41,17 @@
 
 ---
 
+## 📦 直接下载安装包（推荐）
+
+前往 [**GitHub Releases**](https://github.com/Over9rowth/LiteIME/releases) 下载最新打包产物（内置 64 位 & 32 位 TSF 组件、55 万+ 基础词库、双拼/设置中心、二元模型及专业领域词包）：
+
+- **`LiteIME-Setup-<version>-win64.exe`**：Windows 一键图形化安装程序（自动配置 UWP AppContainer 权限、注册 64/32 位 TSF 与系统输入法列表，并自带标准卸载程序）。
+- **`LiteIME-<version>-win64-portable.zip`**：绿色便携压缩包（解压后管理员运行 `scripts/install.ps1` 即可注册使用）。
+
+> 安装完成后按 <kbd>Win</kbd> + <kbd>Space</kbd> 切换到 **「极简双语输入法 (LiteIME)」** 即可打字；所有个人词库与配置均保存在 `%APPDATA%\LiteIME`，升级或卸载均不会清除个人数据。
+
+---
+
 ## 🛠️ 从源码构建与安装
 
 ### 1. 构建准备
