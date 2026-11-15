@@ -1485,6 +1485,42 @@ int wmain() {
             CHECK(UserDict::loadConfig(cfgPath, loadedCfg));
             CHECK(loadedCfg.scheme == PinyinScheme::Xiaohe);
         }
+
+        // Codex Round 2 Fixes: QuickInput 4095-byte limit (no silent truncation) & UserDict::load dirty flush
+        {
+            UserDict udR2;
+            const std::filesystem::path r2Dir = tmpDir / "codex_r2";
+            std::filesystem::remove_all(r2Dir);
+            const std::filesystem::path r2UserPath = r2Dir / "user_dict.tsv";
+            udR2.load(r2UserPath);
+
+            // Exact boundary: 4095 bytes allowed, 4096 bytes rejected without overwriting existing valid items
+            CHECK(udR2.setQuickInputs({{"exact", std::string(UserDict::kMaxQuickInputBytes, 'a')}}));
+            CHECK(udR2.quickInputs().size() == 1);
+            CHECK(!udR2.setQuickInputs({{"too_long", std::string(UserDict::kMaxQuickInputBytes + 1, 'b')}}));
+            CHECK(udR2.quickInputs().size() == 1);
+            CHECK(udR2.quickInputs()[0].label == "exact");
+
+            // loadQuickInputs skips oversized entries written directly to quick_input.tsv
+            CHECK(udR2.saveQuickInputs());
+            {
+                std::ofstream ofs(udR2.quickInputsPath(), std::ios::app | std::ios::binary);
+                ofs << "oversize\t" << std::string(UserDict::kMaxQuickInputBytes + 10, 'z') << "\n";
+                ofs << "valid2\tok2\n";
+            }
+            CHECK(udR2.loadQuickInputs(udR2.quickInputsPath()));
+            CHECK(udR2.quickInputs().size() == 2);
+            CHECK(udR2.quickInputs()[0].label == "exact");
+            CHECK(udR2.quickInputs()[1].label == "valid2");
+
+            // UserDict::load auto-flushes dirty user_dict & user_bigram before clearing/reloading
+            udR2.recordSelection("baoliu", "保留");
+            udR2.recordBigram("保留", "记录");
+            CHECK(udR2.dirty());
+            udR2.load(r2UserPath);
+            CHECK(!udR2.lookup("baoliu").empty());
+            CHECK(udR2.getBigramBonus("保留", "记录") > 1.0);
+        }
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

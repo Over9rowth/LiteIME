@@ -382,11 +382,9 @@ void PipeServer::notifyAcceptLoop() {
 }
 
 bool PipeServer::sendNotify(uint32_t targetPid, const ipc::NotifyPacket& pkt) {
-    if (targetPid == 0 || !running_.load(std::memory_order_acquire)) return false;
+    if (targetPid == 0 || pkt.targetHwnd == 0 || !running_.load(std::memory_order_acquire)) return false;
 
     std::lock_guard<std::mutex> lock(notifyMutex_);
-    bool sentAny = false;
-    HANDLE writeEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     auto it = notifyClients_.begin();
     while (it != notifyClients_.end()) {
         DWORD avail = 0;
@@ -398,7 +396,41 @@ bool PipeServer::sendNotify(uint32_t targetPid, const ipc::NotifyPacket& pkt) {
                 continue;
             }
         }
+        ++it;
+    }
+
+    bool hasExactMatch = false;
+    for (const auto& nc : notifyClients_) {
+        if (nc.pid == targetPid && nc.hwnd == pkt.targetHwnd) {
+            hasExactMatch = true;
+            break;
+        }
+    }
+
+    HWND targetHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(pkt.targetHwnd));
+    HWND targetRoot = IsWindow(targetHwnd) ? GetAncestor(targetHwnd, GA_ROOT) : nullptr;
+
+    bool sentAny = false;
+    HANDLE writeEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    it = notifyClients_.begin();
+    while (it != notifyClients_.end()) {
         if (it->pid == targetPid) {
+            bool match = false;
+            if (hasExactMatch) {
+                match = (it->hwnd == pkt.targetHwnd);
+            } else if (it->hwnd == 0) {
+                match = true;
+            } else if (targetRoot != nullptr) {
+                HWND ncHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(it->hwnd));
+                if (IsWindow(ncHwnd) && GetAncestor(ncHwnd, GA_ROOT) == targetRoot) {
+                    match = true;
+                }
+            }
+            if (!match) {
+                ++it;
+                continue;
+            }
+
             ResetEvent(writeEvt);
             OVERLAPPED ov{};
             ov.hEvent = writeEvt;

@@ -180,6 +180,16 @@ LRESULT CALLBACK quickInputDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     MessageBoxW(hwnd, L"\u8bf7\u5148\u8f93\u5165\u8981\u5feb\u901f\u586b\u5165\u7684\u5185\u5bb9\u3002", L"LiteIME", MB_ICONINFORMATION);
                     return 0;
                 }
+                if (value.size() > engine::UserDict::kMaxQuickInputBytes) {
+                    const std::wstring msg =
+                        L"\u5feb\u8f93\u5165\u5185\u5bb9\u8fc7\u957f\uff08\u5f53\u524d " +
+                        std::to_wstring(value.size()) +
+                        L" \u5b57\u8282\uff0c\u4e0a\u9650 " +
+                        std::to_wstring(engine::UserDict::kMaxQuickInputBytes) +
+                        L" UTF-8 \u5b57\u8282\uff09\uff0c\u4e3a\u907f\u514d\u4e0a\u5c4f\u622a\u65ad\u5df2\u62d2\u7edd\u6dfb\u52a0\u3002";
+                    MessageBoxW(hwnd, msg.c_str(), L"LiteIME", MB_ICONWARNING);
+                    return 0;
+                }
                 int sel = static_cast<int>(SendDlgItemMessageW(hwnd, kIdList, LB_GETCURSEL, 0, 0));
                 bool updated = false;
                 if (sel >= 0 && sel < static_cast<int>(st->items.size()) &&
@@ -206,6 +216,16 @@ LRESULT CALLBACK quickInputDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 return 0;
             }
             if (id == kIdBtnSave) {
+                for (const auto& q : st->items) {
+                    if (q.value.size() > engine::UserDict::kMaxQuickInputBytes) {
+                        const std::wstring msg =
+                            L"\u5b58\u5728\u8d85\u8fc7 " +
+                            std::to_wstring(engine::UserDict::kMaxQuickInputBytes) +
+                            L" UTF-8 \u5b57\u8282\u4e0a\u9650\u7684\u5feb\u8f93\u5165\u6761\u76ee\uff0c\u8bf7\u7cbe\u7b80\u540e\u518d\u4fdd\u5b58\u3002";
+                        MessageBoxW(hwnd, msg.c_str(), L"LiteIME", MB_ICONWARNING);
+                        return 0;
+                    }
+                }
                 st->accepted = true;
                 st->closed = true;
                 DestroyWindow(hwnd);

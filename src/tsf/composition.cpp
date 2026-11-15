@@ -72,15 +72,20 @@ private:
 class CApplyResponseSession final : public CEditSessionBase {
 public:
     CApplyResponseSession(CTextService* svc, ITfContext* ctx, const ipc::Response& resp,
-                          bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal)
+                          bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal,
+                          bool requireActiveFocus)
         : CEditSessionBase(svc, ctx),
           resp_(resp),
           hasPreCaret_(hasPreCaret),
           preCaretX_(preCaretX),
           preCaretY_(preCaretY),
-          hwndVal_(hwndVal) {}
+          hwndVal_(hwndVal),
+          requireActiveFocus_(requireActiveFocus) {}
 
     STDMETHODIMP DoEditSession(TfEditCookie ec) override {
+        if (requireActiveFocus_ && !svc_->isContextAndHwndFocused(ctx_, hwndVal_)) {
+            return S_OK;
+        }
         ScopedPerMonitorDpi dpiGuard;
         HRESULT hr = svc_->applyResponseInSession(ec, ctx_, resp_);
         if (SUCCEEDED(hr) && resp_.preeditLen > 0) {
@@ -104,6 +109,7 @@ private:
     int preCaretX_ = 0;
     int preCaretY_ = 0;
     uint64_t hwndVal_ = 0;
+    bool requireActiveFocus_ = false;
 };
 
 class CCaretQuerySession final : public CEditSessionBase {
@@ -334,12 +340,13 @@ void CTextService::sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t 
 }
 
 void CTextService::applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
-                                      bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal) {
+                                      bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal,
+                                      bool requireActiveFocus) {
     if (!pic || clientId_ == TF_CLIENTID_NULL) return;
     const bool hasTextChange = (resp.commitLen > 0 || resp.preeditLen > 0 || isComposing_);
     if (!hasTextChange) return;
 
-    auto* sess = new CApplyResponseSession(this, pic, resp, hasPreCaret, preCaretX, preCaretY, hwndVal);
+    auto* sess = new CApplyResponseSession(this, pic, resp, hasPreCaret, preCaretX, preCaretY, hwndVal, requireActiveFocus);
     HRESULT hrSession = S_OK;
     const HRESULT hrReq = pic->RequestEditSession(
         clientId_, sess, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
@@ -361,7 +368,12 @@ HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM l
     req.isKeyUp = isKeyUp ? 1 : 0;
     req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
     if (!testOnly && req.hwnd != 0) {
+        if (activeHwnd_ != 0 && activeHwnd_ != req.hwnd) {
+            std::lock_guard<std::mutex> lock(notifyMutex_);
+            pendingNotifies_.clear();
+        }
         activeHwnd_ = req.hwnd;
+        pipe_.setNotifyHwnd(req.hwnd);
     }
 
     if (!testOnly && !isKeyUp) {

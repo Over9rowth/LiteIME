@@ -58,6 +58,7 @@ public:
     // Composition helpers used by edit sessions
     HRESULT applyResponseInSession(TfEditCookie ec, ITfContext* pContext, const ipc::Response& resp);
     HRESULT queryCaretInSession(TfEditCookie ec, ITfContext* pContext, RECT* outRect, BOOL* outFound);
+    bool isContextAndHwndFocused(ITfContext* pContext, uint64_t expectedHwnd) const;
     void sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t hwndVal);
     void clearCompositionRef();
 
@@ -76,7 +77,8 @@ private:
 
     void fillCaretPos(ITfContext* pic, ipc::Request& req);
     void applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
-                            bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal);
+                            bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal,
+                            bool requireActiveFocus = false);
     uint32_t currentModifiers() const;
     HRESULT handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM lParam, bool isKeyUp, bool testOnly, BOOL* pfEaten);
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/ipc_protocol.hpp"
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -20,6 +21,7 @@ public:
 
     void startNotify(NotifyCallback cb);
     void stopNotify();
+    void setNotifyHwnd(uint64_t hwnd) { notifyHwnd_.store(hwnd, std::memory_order_release); }
 
 private:
     bool ensureConnected();
@@ -32,6 +34,7 @@ private:
     uint64_t lastLaunchAttemptMs_ = 0;
 
     NotifyCallback notifyCb_;
+    std::atomic<uint64_t> notifyHwnd_{0};
     void* notifyStopEvent_ = nullptr; // HANDLE
     std::thread notifyThread_;
 };

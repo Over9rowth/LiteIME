@@ -73,7 +73,7 @@ void PipeClient::notifyLoop() {
         ipc::NotifyHello hello{};
         hello.magic = ipc::kProtocolMagic;
         hello.pid = GetCurrentProcessId();
-        hello.hwnd = 0;
+        hello.hwnd = notifyHwnd_.load(std::memory_order_acquire);
 
         ResetEvent(ioEvt);
         OVERLAPPED wov{};

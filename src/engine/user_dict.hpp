@@ -65,8 +65,9 @@ public:
     bool savePins() const;
 
     // Quick-input personal snippets ("vvv") stored locally and masked in UI preview.
+    static constexpr size_t kMaxQuickInputBytes = 4095;
     const std::vector<QuickInputItem>& quickInputs() const { return quickInputs_; }
-    void setQuickInputs(std::vector<QuickInputItem> items);
+    bool setQuickInputs(std::vector<QuickInputItem> items);
     static std::string maskQuickValue(std::string_view value);
     bool loadQuickInputs(const std::filesystem::path& path);
     bool saveQuickInputs() const;

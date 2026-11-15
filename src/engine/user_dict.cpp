@@ -1,4 +1,5 @@
 #include "engine/user_dict.hpp"
+#include "common/ipc_protocol.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -88,6 +89,9 @@ std::string unescapeQuickField(std::string_view s) {
 } // namespace
 
 bool UserDict::load(const std::filesystem::path& path) {
+    if (!path_.empty() && dirty() && !saveIfDirty()) {
+        return false;
+    }
     path_ = path;
     entries_.clear();
     clock_ = 1;
@@ -473,11 +477,20 @@ bool UserDict::savePins() const {
     return atomicWriteTextFile(p, oss.str());
 }
 
-void UserDict::setQuickInputs(std::vector<QuickInputItem> items) {
+static_assert(UserDict::kMaxQuickInputBytes + 1 == liteime::ipc::kMaxCommitBytes,
+              "kMaxQuickInputBytes must match IPC commit payload capacity");
+
+bool UserDict::setQuickInputs(std::vector<QuickInputItem> items) {
     items.erase(std::remove_if(items.begin(), items.end(), [](const QuickInputItem& q) {
         return q.value.empty();
     }), items.end());
+    for (const auto& q : items) {
+        if (q.value.size() > kMaxQuickInputBytes) {
+            return false;
+        }
+    }
     quickInputs_ = std::move(items);
+    return true;
 }
 
 std::string UserDict::maskQuickValue(std::string_view value) {
@@ -533,7 +546,7 @@ bool UserDict::loadQuickInputs(const std::filesystem::path& path) {
         if (t1 == std::string::npos) continue;
         std::string label = unescapeQuickField(std::string_view(line.data(), t1));
         std::string value = unescapeQuickField(std::string_view(line.data() + t1 + 1, line.size() - t1 - 1));
-        if (!value.empty()) {
+        if (!value.empty() && value.size() <= kMaxQuickInputBytes) {
             quickInputs_.push_back(QuickInputItem{std::move(label), std::move(value)});
         }
     }

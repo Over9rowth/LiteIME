@@ -92,7 +92,10 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid, DWORD)
     req.type = hasFocus ? ipc::MsgType::FocusChanged : ipc::MsgType::Ping;
     req.focusGained = hasFocus ? 1 : 0;
     req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
-    if (hasFocus && req.hwnd != 0) activeHwnd_ = req.hwnd;
+    if (hasFocus && req.hwnd != 0) {
+        activeHwnd_ = req.hwnd;
+        pipe_.setNotifyHwnd(req.hwnd);
+    }
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
 
@@ -116,6 +119,11 @@ STDMETHODIMP CTextService::Deactivate() {
     pipe_.sendRequest(req, resp);
 
     activeHwnd_ = 0;
+    pipe_.setNotifyHwnd(0);
+    {
+        std::lock_guard<std::mutex> lock(notifyMutex_);
+        pendingNotifies_.clear();
+    }
     clearCompositionRef();
     updateTextEditSink(nullptr);
     uninitKeyEventSink();
@@ -163,6 +171,46 @@ void CTextService::enqueueNotify(const ipc::NotifyPacket& pkt) {
     PostMessageW(dst, kWmApplyNotify, 0, 0);
 }
 
+bool CTextService::isContextAndHwndFocused(ITfContext* pContext, uint64_t expectedHwnd) const {
+    if (!threadMgr_ || !pContext || expectedHwnd == 0) return false;
+
+    HWND expectedWin = reinterpret_cast<HWND>(static_cast<uintptr_t>(expectedHwnd));
+    HWND curFocus = GetFocus();
+    if (!curFocus || curFocus != expectedWin) return false;
+
+    HWND fg = GetForegroundWindow();
+    DWORD fgPid = 0;
+    if (!fg || !GetWindowThreadProcessId(fg, &fgPid) || fgPid != GetCurrentProcessId()) {
+        return false;
+    }
+    HWND fgRoot = GetAncestor(fg, GA_ROOT);
+    HWND curRoot = GetAncestor(curFocus, GA_ROOT);
+    if (!fgRoot || !curRoot || fgRoot != curRoot) {
+        return false;
+    }
+
+    ITfDocumentMgr* pdim = nullptr;
+    if (FAILED(threadMgr_->GetFocus(&pdim)) || !pdim) {
+        return false;
+    }
+    ITfContext* topCtx = nullptr;
+    const HRESULT hrTop = pdim->GetTop(&topCtx);
+    pdim->Release();
+    if (FAILED(hrTop) || !topCtx) {
+        return false;
+    }
+
+    IUnknown* unkTop = nullptr;
+    IUnknown* unkTarget = nullptr;
+    const bool okTop = SUCCEEDED(topCtx->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&unkTop))) && unkTop;
+    const bool okTarget = SUCCEEDED(pContext->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&unkTarget))) && unkTarget;
+    const bool sameCtx = (okTop && okTarget && unkTop == unkTarget);
+    if (unkTop) unkTop->Release();
+    if (unkTarget) unkTarget->Release();
+    topCtx->Release();
+    return sameCtx;
+}
+
 void CTextService::drainNotifyQueue() {
     std::vector<ipc::NotifyPacket> batch;
     {
@@ -171,29 +219,28 @@ void CTextService::drainNotifyQueue() {
     }
     if (batch.empty() || !threadMgr_) return;
 
+    ITfContext* pic = nullptr;
+    ITfDocumentMgr* pdim = nullptr;
+    if (SUCCEEDED(threadMgr_->GetFocus(&pdim)) && pdim) {
+        pdim->GetTop(&pic);
+        pdim->Release();
+    }
+    if (!pic) return;
+
     for (const auto& pkt : batch) {
-        if (pkt.targetHwnd != 0 && activeHwnd_ != 0 && pkt.targetHwnd != activeHwnd_ && !isComposing_) {
+        if (!isContextAndHwndFocused(pic, pkt.targetHwnd)) {
             continue;
         }
+        activeHwnd_ = pkt.targetHwnd;
+        pipe_.setNotifyHwnd(pkt.targetHwnd);
+
         const ipc::Response& resp = pkt.response;
         const bool hasTextChange = (resp.commitLen > 0 || resp.preeditLen > 0 || isComposing_);
         if (!hasTextChange) continue;
 
-        ITfContext* pic = textEditContext_;
-        if (pic) {
-            pic->AddRef();
-        } else {
-            ITfDocumentMgr* pdim = nullptr;
-            if (SUCCEEDED(threadMgr_->GetFocus(&pdim)) && pdim) {
-                pdim->GetTop(&pic);
-                pdim->Release();
-            }
-        }
-        if (pic) {
-            applyResponseAsync(pic, resp, false, 0, 0, activeHwnd_);
-            pic->Release();
-        }
+        applyResponseAsync(pic, resp, false, 0, 0, pkt.targetHwnd, true);
     }
+    pic->Release();
 }
 
 LRESULT CALLBACK CTextService::notifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -296,10 +343,27 @@ STDMETHODIMP CTextService::OnPopContext(ITfContext*) { return S_OK; }
 
 STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus, ITfDocumentMgr*) {
     updateTextEditSink(pdimFocus);
+    const uint64_t focusHwnd = reinterpret_cast<uint64_t>(GetFocus());
+    if (!pdimFocus) {
+        activeHwnd_ = 0;
+        pipe_.setNotifyHwnd(0);
+        {
+            std::lock_guard<std::mutex> lock(notifyMutex_);
+            pendingNotifies_.clear();
+        }
+    } else {
+        if (focusHwnd != activeHwnd_) {
+            std::lock_guard<std::mutex> lock(notifyMutex_);
+            pendingNotifies_.clear();
+        }
+        activeHwnd_ = focusHwnd;
+        pipe_.setNotifyHwnd(focusHwnd);
+    }
+
     ipc::Request req{};
     req.type = ipc::MsgType::FocusChanged;
     req.focusGained = (pdimFocus != nullptr) ? 1 : 0;
-    req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
+    req.hwnd = focusHwnd;
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
     if (!pdimFocus) clearCompositionRef();
@@ -316,10 +380,27 @@ STDMETHODIMP CTextService::OnEndEdit(ITfContext*, TfEditCookie, ITfEditRecord*) 
 }
 
 STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground) {
+    const uint64_t focusHwnd = reinterpret_cast<uint64_t>(GetFocus());
+    if (!fForeground) {
+        activeHwnd_ = 0;
+        pipe_.setNotifyHwnd(0);
+        {
+            std::lock_guard<std::mutex> lock(notifyMutex_);
+            pendingNotifies_.clear();
+        }
+    } else if (focusHwnd != 0) {
+        if (focusHwnd != activeHwnd_) {
+            std::lock_guard<std::mutex> lock(notifyMutex_);
+            pendingNotifies_.clear();
+        }
+        activeHwnd_ = focusHwnd;
+        pipe_.setNotifyHwnd(focusHwnd);
+    }
+
     ipc::Request req{};
     req.type = ipc::MsgType::FocusChanged;
     req.focusGained = fForeground ? 1 : 0;
-    req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
+    req.hwnd = focusHwnd;
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
     if (!fForeground) clearCompositionRef();
