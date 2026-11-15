@@ -1367,6 +1367,124 @@ int wmain() {
             CHECK(urlEng.currentPageItems().empty() || urlEng.currentPageItems()[0].comment != "[URL]");
             urlEng.handleKey(0x1B, 0, false);
         }
+
+        // Enhancement 1: Bigram Beam Viterbi DP + User Bigram co-occurrence learning
+        {
+            std::vector<RawPhraseRecord> biPhrases = {
+                {"是", "shi", 9000, 1},
+                {"事", "shi", 4000, 1},
+                {"时", "shi", 3500, 1},
+                {"没", "mei", 8000, 1},
+                {"美", "mei", 5000, 1},
+                {"好", "hao", 9500, 1},
+                {"豪", "hao", 2000, 1},
+                {"的", "de", 20000, 1},
+                {"我", "wo", 15000, 1},
+                {"在", "zai", 12000, 1},
+                {"写", "xie", 6000, 1},
+                {"谢", "xie", 6200, 1}, // slightly higher unigram freq than "写"
+                {"测试", "ce shi", 8000, 2},
+                {"策划", "ce hua", 8000, 2},
+            };
+            std::filesystem::path biDictPath = tmpDir / "bigram_test.dict";
+            CHECK(BinaryDict::compileToFile(biDictPath, biPhrases, {}));
+            BinaryDict biDict;
+            CHECK(biDict.loadFile(biDictPath));
+
+            BilingualEngine biEng;
+            biEng.setDictionary(&biDict);
+            // "写" has lower raw unigram freq than "谢", but builtin/custom bigram "在 -> 写" wins over "在 -> 谢"
+            for (char ch : std::string("zaixie")) {
+                biEng.handleKey(static_cast<uint32_t>(ch - 'a' + 'A'), 0, false);
+            }
+            auto bItems = biEng.currentPageItems();
+            CHECK(!bItems.empty() && bItems[0].text == "在写");
+            biEng.handleKey(0x1B, 0, false);
+
+            // "mei shi": without context "是" > "事", with bigram "没 -> 事" ("mei shi" -> "没事") wins!
+            for (char ch : std::string("meishi")) {
+                biEng.handleKey(static_cast<uint32_t>(ch - 'a' + 'A'), 0, false);
+            }
+            auto mItems = biEng.currentPageItems();
+            CHECK(!mItems.empty() && mItems[0].text == "没事");
+            biEng.handleKey(0x1B, 0, false);
+
+            // Dynamic user bigram learning & persistence
+            std::filesystem::path biUserPath = tmpDir / "bigram_user" / "user_dict.tsv";
+            biEng.userDict().load(biUserPath);
+            biEng.userDict().recordBigram("测试", "策划");
+            biEng.userDict().recordBigram("测试", "策划");
+            CHECK(biEng.userDict().dirty());
+            CHECK(biEng.userDict().saveIfDirty());
+            CHECK(!biEng.userDict().dirty());
+            CHECK(std::filesystem::exists(biEng.userDict().bigramsPath()));
+
+            UserDict biReload;
+            biReload.load(biUserPath);
+            CHECK(biReload.getBigramBonus("测试", "策划") > 1.0);
+        }
+
+        // Enhancement 2: Double Pinyin (Xiaohe, Microsoft, Ziranma, Sogou) + Scheme Config persistence
+        {
+            auto xh1 = PinyinTable::decodeShuangpinPair('n', 'i', PinyinScheme::Xiaohe);
+            CHECK(!xh1.empty() && xh1[0] == "ni");
+            auto xh2 = PinyinTable::decodeShuangpinPair('h', 'c', PinyinScheme::Xiaohe);
+            CHECK(!xh2.empty() && xh2[0] == "hao");
+            auto xh3 = PinyinTable::decodeShuangpinPair('v', 'l', PinyinScheme::Xiaohe);
+            CHECK(!xh3.empty() && xh3[0] == "zhuang");
+            auto xh4 = PinyinTable::decodeShuangpinPair('a', 'n', PinyinScheme::Xiaohe);
+            CHECK(!xh4.empty() && xh4[0] == "an");
+
+            auto msIng = PinyinTable::decodeShuangpinPair('j', ';', PinyinScheme::Microsoft);
+            CHECK(!msIng.empty() && msIng[0] == "jing");
+            auto msZero = PinyinTable::decodeShuangpinPair('o', 'k', PinyinScheme::Sogou);
+            CHECK(!msZero.empty() && msZero[0] == "ao");
+            auto zr1 = PinyinTable::decodeShuangpinPair('u', 'd', PinyinScheme::Ziranma);
+            CHECK(!zr1.empty() && zr1[0] == "shuang");
+
+            auto spSeg = PinyinTable::segmentScheme("nihc", PinyinScheme::Xiaohe, 3);
+            CHECK(!spSeg.empty() && spSeg[0].joinedKey() == "ni hao");
+
+            std::vector<RawPhraseRecord> spPhrases = {
+                {"你好", "ni hao", 10000, 2},
+                {"北京", "bei jing", 9000, 2},
+                {"小鹤", "xiao he", 8000, 2},
+            };
+            std::filesystem::path spDictPath = tmpDir / "sp_test.dict";
+            CHECK(BinaryDict::compileToFile(spDictPath, spPhrases, {}));
+            BinaryDict spDict;
+            CHECK(spDict.loadFile(spDictPath));
+
+            BilingualEngine spEng;
+            spEng.setDictionary(&spDict);
+            spEng.config().scheme = PinyinScheme::Xiaohe;
+            for (char ch : std::string("nihc")) {
+                spEng.handleKey(static_cast<uint32_t>(ch - 'a' + 'A'), 0, false);
+            }
+            auto spItems = spEng.currentPageItems();
+            CHECK(!spItems.empty() && spItems[0].text == "你好");
+            auto spCommit = spEng.handleKey(0x20, 0, false);
+            CHECK(spCommit.consumed && spCommit.commitText == "你好");
+
+            // Microsoft Shuangpin with ';' key for 'ing': "bei jing" -> "bzj;"
+            spEng.config().scheme = PinyinScheme::Microsoft;
+            spEng.handleKey('B', 0, false);
+            spEng.handleKey('Z', 0, false); // bei
+            spEng.handleKey('J', 0, false);
+            spEng.handleKey(0xBA, 0, false); // j; -> jing
+            auto msItems = spEng.currentPageItems();
+            CHECK(!msItems.empty() && msItems[0].text == "北京");
+            spEng.handleKey(0x1B, 0, false);
+
+            // Config round-trip for PinyinScheme
+            EngineConfig savedCfg{};
+            savedCfg.scheme = PinyinScheme::Xiaohe;
+            std::filesystem::path cfgPath = tmpDir / "scheme_config.ini";
+            CHECK(UserDict::saveConfig(cfgPath, savedCfg));
+            EngineConfig loadedCfg{};
+            CHECK(UserDict::loadConfig(cfgPath, loadedCfg));
+            CHECK(loadedCfg.scheme == PinyinScheme::Xiaohe);
+        }
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

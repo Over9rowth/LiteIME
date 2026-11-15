@@ -147,6 +147,7 @@ void BilingualEngine::notifyFocusChanged(bool gained) {
         shiftDownOnly_ = false;
         doubleQuoteOpen_ = true;
         singleQuoteOpen_ = true;
+        lastCommittedWord_.clear();
         userDict_.saveIfDirty();
     }
     lastCommittedChar_ = '\0';
@@ -357,12 +358,16 @@ void BilingualEngine::undoLastPrefixStep() {
     rawBuffer_ = step.rawConsumed;
 }
 
-KeyActionResult BilingualEngine::finalizeCommit(const std::string& text, bool resetModeFlags, bool isQuickInput) {
+KeyActionResult BilingualEngine::finalizeCommit(const std::string& text,
+                                                bool resetModeFlags,
+                                                bool isQuickInput,
+                                                std::string nextBigramCtx) {
     KeyActionResult res;
     res.consumed = true;
     res.isQuickInput = isQuickInput;
     res.commitText = (config_.fullWidth && !isQuickInput) ? toFullWidthUtf8(text) : text;
     lastCommittedQuoteKind_ = 0;
+    lastCommittedWord_ = std::move(nextBigramCtx);
     if (!text.empty()) {
         char last = text.back();
         lastCommittedChar_ = (static_cast<unsigned char>(last) < 0x80) ? last : '\0';
@@ -393,6 +398,16 @@ KeyActionResult BilingualEngine::commitCandidateAtGlobalIndex(size_t idx) {
 
     const std::string chosenCommit = chosen.commitText.empty() ? chosen.text : chosen.commitText;
     const bool allowLearn = canLearnCandidateKind(chosen.kind) && !chosen.matchedKey.empty();
+    const bool learnChineseBigram = allowLearn && chosen.kind != CandidateKind::EnglishWord;
+
+    // Record bigram co-occurrence from prior prefix step or previous committed Chinese word
+    if (learnChineseBigram) {
+        if (!prefixSteps_.empty()) {
+            userDict_.recordBigram(prefixSteps_.back().word, chosenCommit);
+        } else if (!lastCommittedWord_.empty()) {
+            userDict_.recordBigram(lastCommittedWord_, chosenCommit);
+        }
+    }
 
     // If user chose an English word, dynamic shortcut, quick input, or full match
     if (chosen.consumedRawChars >= rawBuffer_.size() || chosen.consumedRawChars == 0) {
@@ -405,11 +420,11 @@ KeyActionResult BilingualEngine::commitCandidateAtGlobalIndex(size_t idx) {
                 committedPrefixPinyin_ += chosen.matchedKey;
                 flushPendingLearnedPhrase();
                 std::string full = committedPrefixWords_;
-                return finalizeCommit(full, true, isQuick);
+                return finalizeCommit(full, true, isQuick, learnChineseBigram ? chosenCommit : std::string{});
             }
         }
         std::string full = committedPrefixWords_ + chosenCommit;
-        return finalizeCommit(full, true, isQuick);
+        return finalizeCommit(full, true, isQuick, learnChineseBigram ? chosenCommit : std::string{});
     }
 
     // Partial selection (e.g. selected "我想" out of "woxiangkan"): keep remaining rawBuffer_!
@@ -433,7 +448,7 @@ KeyActionResult BilingualEngine::commitCandidateAtGlobalIndex(size_t idx) {
     if (rawBuffer_.empty()) {
         flushPendingLearnedPhrase();
         std::string full = committedPrefixWords_;
-        return finalizeCommit(full);
+        return finalizeCommit(full, true, false, learnChineseBigram ? chosenCommit : std::string{});
     }
 
     rebuildCandidates();
@@ -595,6 +610,22 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
                 if (testOnly) { res.consumed = true; return res; }
                 urlMode_ = true;
                 rawBuffer_.push_back('@');
+                rebuildCandidates();
+                return buildComposeResult();
+            }
+        }
+
+        // In Microsoft / Sogou Shuangpin, ';' serves as final "ing" on odd position of current syllable chunk
+        if (!urlMode_ && !shift && vk == kVkOem1 &&
+            (config_.scheme == PinyinScheme::Microsoft || config_.scheme == PinyinScheme::Sogou) &&
+            !rawBuffer_.empty() && rawBuffer_.size() < 64) {
+            size_t lastSep = rawBuffer_.rfind('\'');
+            size_t chunkStart = (lastSep == std::string::npos) ? 0 : (lastSep + 1);
+            size_t chunkLen = rawBuffer_.size() - chunkStart;
+            if ((chunkLen % 2) == 1 &&
+                !PinyinTable::decodeShuangpinPair(rawBuffer_.back(), ';', config_.scheme).empty()) {
+                if (testOnly) { res.consumed = true; return res; }
+                rawBuffer_.push_back(';');
                 rebuildCandidates();
                 return buildComposeResult();
             }
@@ -827,6 +858,7 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         }
         lastCommittedQuoteKind_ = 0;
         lastCommittedChar_ = '\0';
+        lastCommittedWord_.clear();
     }
     return res;
 }

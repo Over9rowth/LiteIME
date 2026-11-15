@@ -37,6 +37,15 @@ public:
     // Segments lowercase ASCII input (allowing ' as manual separator) into top-K paths.
     static std::vector<SegmentPath> segment(std::string_view input, size_t maxPaths = 4);
 
+    // Segments lowercase input under the configured PinyinScheme (Quanpin or Shuangpin).
+    static std::vector<SegmentPath> segmentScheme(std::string_view input,
+                                                  PinyinScheme scheme,
+                                                  size_t maxPaths = 4);
+
+    // Decodes a 2-key Shuangpin syllable code into canonical full pinyin syllables.
+    static std::vector<std::string> decodeShuangpinPair(char c1, char c2, PinyinScheme scheme);
+    static std::string decodeShuangpinInitialKey(char c1, PinyinScheme scheme);
+
     // Segments input allowing obvious single-syllable typo corrections when raw text has invalid sequences.
     static std::vector<SegmentPath> segmentWithTypos(std::string_view input, size_t maxPaths = 3);
 

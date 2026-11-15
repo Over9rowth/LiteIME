@@ -31,12 +31,19 @@ class UserDict {
 public:
     bool load(const std::filesystem::path& path);
     bool save() const;
-    bool saveIfDirty() const { return dirty_ ? save() : true; }
-    bool dirty() const { return dirty_; }
+    bool saveIfDirty() const;
+    bool dirty() const { return dirty_ || bigramDirty_; }
     void markDirty() { dirty_ = true; }
 
     void recordSelection(std::string_view pinyinKey, std::string_view word);
     bool removeEntry(std::string_view pinyinKey, std::string_view word);
+
+    // Dynamic user bigram co-occurrence learning ("prevWord -> curWord")
+    void recordBigram(std::string_view prevWord, std::string_view curWord);
+    double getBigramBonus(std::string_view prevWord, std::string_view curWord) const;
+    bool loadBigrams(const std::filesystem::path& path);
+    bool saveBigrams() const;
+    std::filesystem::path bigramsPath() const;
 
     std::vector<UserEntry> lookup(std::string_view pinyinKey) const;
     std::vector<std::pair<std::string, UserEntry>> lookupSingleSyllablePrefix(std::string_view prefix) const;
@@ -77,8 +84,10 @@ private:
     std::filesystem::path path_;
     uint64_t clock_ = 1;
     mutable bool dirty_ = false;
+    mutable bool bigramDirty_ = false;
     std::unordered_map<std::string, std::vector<UserEntry>> entries_;
     std::unordered_map<std::string, std::vector<PinnedEntry>> pins_;
+    std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> bigrams_;
     std::vector<QuickInputItem> quickInputs_;
 };
 

@@ -592,4 +592,291 @@ std::vector<std::vector<std::string>> PinyinTable::expandFuzzyTokens(
     return combos;
 }
 
+namespace {
+
+struct ShuangpinFinals {
+    const char* f1 = nullptr;
+    const char* f2 = nullptr;
+    const char* f3 = nullptr;
+};
+
+ShuangpinFinals mapShuangpinFinal(char key, PinyinScheme scheme) {
+    if (scheme == PinyinScheme::Xiaohe) {
+        switch (key) {
+            case 'a': return {"a"};
+            case 'b': return {"in"};
+            case 'c': return {"ao"};
+            case 'd': return {"ai"};
+            case 'e': return {"e"};
+            case 'f': return {"en"};
+            case 'g': return {"eng"};
+            case 'h': return {"ang"};
+            case 'i': return {"i"};
+            case 'j': return {"an"};
+            case 'k': return {"ing", "uai"};
+            case 'l': return {"iang", "uang"};
+            case 'm': return {"ian"};
+            case 'n': return {"iao"};
+            case 'o': return {"uo", "o"};
+            case 'p': return {"ie"};
+            case 'q': return {"iu"};
+            case 'r': return {"uan"};
+            case 's': return {"ong", "iong"};
+            case 't': return {"ue", "ve"};
+            case 'u': return {"u"};
+            case 'v': return {"ui", "v"};
+            case 'w': return {"ei"};
+            case 'x': return {"ia", "ua"};
+            case 'y': return {"un"};
+            case 'z': return {"ou"};
+            default:  return {};
+        }
+    }
+    if (scheme == PinyinScheme::Ziranma) {
+        switch (key) {
+            case 'a': return {"a"};
+            case 'b': return {"ou"};
+            case 'c': return {"iao"};
+            case 'd': return {"iang", "uang"};
+            case 'e': return {"e"};
+            case 'f': return {"en"};
+            case 'g': return {"eng"};
+            case 'h': return {"ang"};
+            case 'i': return {"i"};
+            case 'j': return {"an"};
+            case 'k': return {"ao"};
+            case 'l': return {"ai"};
+            case 'm': return {"ian"};
+            case 'n': return {"in"};
+            case 'o': return {"uo", "o"};
+            case 'p': return {"un"};
+            case 'q': return {"iu"};
+            case 'r': return {"uan", "er"};
+            case 's': return {"ong", "iong"};
+            case 't': return {"ue", "ve"};
+            case 'u': return {"u"};
+            case 'v': return {"ui", "v"};
+            case 'w': return {"ia", "ua"};
+            case 'x': return {"ie"};
+            case 'y': return {"uai", "ing"};
+            case 'z': return {"ei"};
+            default:  return {};
+        }
+    }
+    // Microsoft & Sogou Shuangpin
+    switch (key) {
+        case 'a': return {"a"};
+        case 'b': return {"ou"};
+        case 'c': return {"iao"};
+        case 'd': return {"iang", "uang"};
+        case 'e': return {"e"};
+        case 'f': return {"en"};
+        case 'g': return {"eng"};
+        case 'h': return {"ang"};
+        case 'i': return {"i"};
+        case 'j': return {"an"};
+        case 'k': return {"ao"};
+        case 'l': return {"ai"};
+        case 'm': return {"ian"};
+        case 'n': return {"in"};
+        case 'o': return {"uo", "o"};
+        case 'p': return {"un"};
+        case 'q': return {"iu"};
+        case 'r': return {"uan", "er"};
+        case 's': return {"ong", "iong"};
+        case 't': return {"ue", "ve"};
+        case 'u': return {"u"};
+        case 'v': return {"ui", "ve", "v"};
+        case 'w': return {"ia", "ua"};
+        case 'x': return {"ie"};
+        case 'y': return {"uai", "v"};
+        case 'z': return {"ei"};
+        case ';': return {"ing"};
+        default:  return {};
+    }
+}
+
+const char* zeroInitialDoubleMap(char c1, char c2, PinyinScheme scheme) {
+    // Common direct zero-initial 2-char encodings supported across Xiaohe / Ziranma
+    auto commonZero = [c1, c2]() -> const char* {
+        if (c1 == 'a') {
+            if (c2 == 'a') return "a";
+            if (c2 == 'i') return "ai";
+            if (c2 == 'n') return "an";
+            if (c2 == 'o') return "ao";
+            if (c2 == 'h') return "ang";
+        } else if (c1 == 'e') {
+            if (c2 == 'e') return "e";
+            if (c2 == 'i') return "ei";
+            if (c2 == 'n') return "en";
+            if (c2 == 'r') return "er";
+            if (c2 == 'g') return "eng";
+        } else if (c1 == 'o') {
+            if (c2 == 'o') return "o";
+            if (c2 == 'u') return "ou";
+        }
+        return nullptr;
+    };
+
+    if (scheme == PinyinScheme::Microsoft || scheme == PinyinScheme::Sogou) {
+        if (c1 == 'o') {
+            if (c2 == 'u') return "ou";
+            ShuangpinFinals fin = mapShuangpinFinal(c2, scheme);
+            for (const char* f : {fin.f1, fin.f2, fin.f3}) {
+                if (!f) continue;
+                if (syllableSet().count(f) > 0) return f;
+            }
+        }
+        return commonZero();
+    }
+    return commonZero();
+}
+
+} // namespace
+
+std::string PinyinTable::decodeShuangpinInitialKey(char c1, PinyinScheme) {
+    if (c1 >= 'A' && c1 <= 'Z') c1 = static_cast<char>(c1 - 'A' + 'a');
+    if (c1 == 'v') return "zh";
+    if (c1 == 'i') return "ch";
+    if (c1 == 'u') return "sh";
+    if (c1 >= 'a' && c1 <= 'z') return std::string(1, c1);
+    return {};
+}
+
+std::vector<std::string> PinyinTable::decodeShuangpinPair(char c1, char c2, PinyinScheme scheme) {
+    if (c1 >= 'A' && c1 <= 'Z') c1 = static_cast<char>(c1 - 'A' + 'a');
+    if (c2 >= 'A' && c2 <= 'Z') c2 = static_cast<char>(c2 - 'A' + 'a');
+    std::vector<std::string> out;
+
+    auto pushUnique = [&out](std::string s) {
+        if (s.empty()) return;
+        if (std::find(out.begin(), out.end(), s) == out.end()) {
+            out.push_back(std::move(s));
+        }
+    };
+
+    if (const char* zero = zeroInitialDoubleMap(c1, c2, scheme)) {
+        std::string norm = canonicalizeSyllable(zero);
+        if (syllableSet().count(norm) > 0) {
+            pushUnique(std::move(norm));
+        }
+    }
+
+    std::string init = decodeShuangpinInitialKey(c1, scheme);
+    if (!init.empty() && init != "a" && init != "e" && init != "o") {
+        ShuangpinFinals fin = mapShuangpinFinal(c2, scheme);
+        for (const char* f : {fin.f1, fin.f2, fin.f3}) {
+            if (!f) continue;
+            std::string cand = canonicalizeSyllable(init + f);
+            if (syllableSet().count(cand) > 0) {
+                pushUnique(std::move(cand));
+            }
+        }
+        // j/q/x/y + u means ü in Mandarin (ju/qu/xu/yu); also accept 'v' gracefully
+        if ((init == "j" || init == "q" || init == "x" || init == "y") && (c2 == 'v' || c2 == 'u')) {
+            std::string ju = init + "u";
+            if (syllableSet().count(ju) > 0) {
+                pushUnique(std::move(ju));
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<SegmentPath> PinyinTable::segmentScheme(std::string_view input,
+                                                    PinyinScheme scheme,
+                                                    size_t maxPaths) {
+    if (scheme == PinyinScheme::Quanpin) {
+        return segment(input, maxPaths);
+    }
+    if (input.empty() || maxPaths == 0) return {};
+
+    struct Chunk {
+        std::string_view sv;
+        uint16_t offset;
+    };
+    std::vector<Chunk> chunks;
+    size_t pos = 0;
+    while (pos < input.size()) {
+        if (input[pos] == '\'') {
+            ++pos;
+            continue;
+        }
+        size_t next = input.find('\'', pos);
+        if (next == std::string_view::npos) next = input.size();
+        if (next > pos) {
+            chunks.push_back({input.substr(pos, next - pos), static_cast<uint16_t>(pos)});
+        }
+        pos = next;
+    }
+    if (chunks.empty()) return {};
+
+    std::vector<SegmentPath> combined;
+    combined.push_back(SegmentPath{{}, 0});
+
+    for (size_t cIdx = 0; cIdx < chunks.size(); ++cIdx) {
+        const auto& chunk = chunks[cIdx];
+        const size_t n = chunk.sv.size();
+        std::vector<SegmentPath> chunkPaths;
+        chunkPaths.push_back(SegmentPath{{}, 0});
+
+        size_t i = 0;
+        while (i + 1 < n) {
+            auto syls = decodeShuangpinPair(chunk.sv[i], chunk.sv[i + 1], scheme);
+            if (syls.empty()) {
+                return {};
+            }
+            std::vector<SegmentPath> nextPaths;
+            for (const auto& prefix : chunkPaths) {
+                for (size_t sIdx = 0; sIdx < syls.size(); ++sIdx) {
+                    SegmentPath p = prefix;
+                    p.tokens.push_back(SyllableToken{
+                        syls[sIdx], false,
+                        static_cast<uint16_t>(chunk.offset + i), 2});
+                    p.score += 10 - static_cast<int>(sIdx);
+                    nextPaths.push_back(std::move(p));
+                    if (nextPaths.size() >= maxPaths * 2) break;
+                }
+                if (nextPaths.size() >= maxPaths * 2) break;
+            }
+            chunkPaths = std::move(nextPaths);
+            i += 2;
+        }
+
+        if (i < n) {
+            // Allow an odd trailing initial only on the final chunk while user is mid-syllable
+            if (cIdx + 1 != chunks.size()) {
+                return {};
+            }
+            std::string part = decodeShuangpinInitialKey(chunk.sv[i], scheme);
+            if (part.empty()) return {};
+            for (auto& p : chunkPaths) {
+                p.tokens.push_back(SyllableToken{
+                    part, true,
+                    static_cast<uint16_t>(chunk.offset + i), 1});
+                p.score -= 4;
+            }
+        }
+
+        std::vector<SegmentPath> nextCombined;
+        for (const auto& a : combined) {
+            for (const auto& b : chunkPaths) {
+                SegmentPath m = a;
+                m.tokens.insert(m.tokens.end(), b.tokens.begin(), b.tokens.end());
+                m.score += b.score;
+                nextCombined.push_back(std::move(m));
+                if (nextCombined.size() >= maxPaths) break;
+            }
+            if (nextCombined.size() >= maxPaths) break;
+        }
+        combined = std::move(nextCombined);
+    }
+
+    std::sort(combined.begin(), combined.end(), [](const SegmentPath& a, const SegmentPath& b) {
+        return a.score > b.score;
+    });
+    if (combined.size() > maxPaths) combined.resize(maxPaths);
+    return combined;
+}
+
 } // namespace liteime::engine

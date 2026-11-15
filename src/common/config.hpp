@@ -23,6 +23,14 @@ enum class InlinePreeditMode : uint8_t {
     None = 2,                // 未最终确认前输入框内不出现字
 };
 
+enum class PinyinScheme : uint8_t {
+    Quanpin = 0,   // 全拼 (默认)
+    Xiaohe = 1,    // 小鹤双拼
+    Microsoft = 2, // 微软双拼
+    Ziranma = 3,   // 自然码双拼
+    Sogou = 4,     // 搜狗双拼
+};
+
 struct FuzzyConfig {
     bool zh_z = false;
     bool ch_c = false;
@@ -60,6 +68,7 @@ struct EngineConfig {
     CandidateLayout layout = CandidateLayout::Horizontal;
     bool squareFrame = true;       // true = crisp square frame, false = capsule rounded frame
     InlinePreeditMode inlinePreedit = InlinePreeditMode::CandidatePreview;
+    PinyinScheme scheme = PinyinScheme::Quanpin;
     FuzzyConfig fuzzy{};
 };
 

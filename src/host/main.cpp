@@ -7,6 +7,7 @@
 #include "host/host_messages.hpp"
 #include "host/pipe_server.hpp"
 #include "host/quick_input_dialog.hpp"
+#include "host/settings_dialog.hpp"
 #include "host/status_window.hpp"
 #include "host/tray_icon.hpp"
 
@@ -40,9 +41,11 @@ struct HostApp {
     liteime::host::TrayIcon tray;
     liteime::host::PipeServer pipeServer;
     fs::path dictPath;
+    fs::path bigramPath;
     fs::path packsDir;
     fs::path userDictPath;
     fs::path customDictsDir;
+    HWND settingsHwnd = nullptr;
     std::vector<std::unique_ptr<liteime::engine::BinaryDict>> extraDicts;
     std::mutex stateMutex;
     std::atomic<bool> uiPostPending{false};
@@ -96,6 +99,20 @@ struct HostApp {
         for (const auto& p : packCandidates) {
             if (!p.empty() && fs::exists(p) && fs::is_directory(p)) {
                 packsDir = p;
+                break;
+            }
+        }
+
+        const fs::path bigramCandidates[] = {
+            exeDir / "bigram.tsv",
+            exeDir / "data" / "bigram.tsv",
+            dictPath.empty() ? fs::path{} : (dictPath.parent_path() / "bigram.tsv"),
+            exeDir.parent_path() / "data" / "bigram.tsv",
+        };
+        bigramPath.clear();
+        for (const auto& p : bigramCandidates) {
+            if (!p.empty() && fs::exists(p)) {
+                bigramPath = p;
                 break;
             }
         }
@@ -182,6 +199,11 @@ struct HostApp {
                 dict = std::move(newMain);
             }
             engine.setDictionary(dict.get());
+            engine.bigramModel().clear();
+            engine.bigramModel().loadBuiltins();
+            if (!bigramPath.empty()) {
+                engine.bigramModel().loadFile(bigramPath);
+            }
             if (engine.userDict().saveIfDirty()) {
                 engine.userDict().load(userDictPath);
             }
@@ -423,6 +445,12 @@ struct HostApp {
     }
 
     void handleAction(liteime::host::HostAction action) {
+        if (action == liteime::host::HostAction::OpenSettings) {
+            if (msgHwnd) {
+                PostMessageW(msgHwnd, liteime::host::WM_APP_OPEN_SETTINGS, 0, 0);
+            }
+            return;
+        }
         if (action == liteime::host::HostAction::OpenCustomDictFolder) {
             std::error_code ec;
             fs::create_directories(customDictsDir, ec);
@@ -469,6 +497,21 @@ struct HostApp {
                         notifyPid = activeClientPid;
                         notifyHwnd = activeTargetHwnd;
                     }
+                    break;
+                case liteime::host::HostAction::SetSchemeQuanpin:
+                    cfg.scheme = liteime::PinyinScheme::Quanpin;
+                    break;
+                case liteime::host::HostAction::SetSchemeXiaohe:
+                    cfg.scheme = liteime::PinyinScheme::Xiaohe;
+                    break;
+                case liteime::host::HostAction::SetSchemeMicrosoft:
+                    cfg.scheme = liteime::PinyinScheme::Microsoft;
+                    break;
+                case liteime::host::HostAction::SetSchemeZiranma:
+                    cfg.scheme = liteime::PinyinScheme::Ziranma;
+                    break;
+                case liteime::host::HostAction::SetSchemeSogou:
+                    cfg.scheme = liteime::PinyinScheme::Sogou;
                     break;
                 case liteime::host::HostAction::TogglePunct:
                     cfg.chinesePunct = !cfg.chinesePunct;
@@ -748,6 +791,52 @@ LRESULT CALLBACK hostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 app->engine.userDict().setQuickInputs(std::move(items));
                 app->engine.userDict().saveQuickInputs();
             }
+            return 0;
+        }
+        case liteime::host::WM_APP_OPEN_SETTINGS: {
+            if (app->settingsHwnd && IsWindow(app->settingsHwnd)) {
+                ShowWindow(app->settingsHwnd, SW_RESTORE);
+                SetForegroundWindow(app->settingsHwnd);
+                return 0;
+            }
+            liteime::EngineConfig cfgCopy;
+            {
+                std::lock_guard<std::mutex> lock(app->stateMutex);
+                cfgCopy = app->engine.config();
+            }
+            auto onApply = [app](const liteime::EngineConfig& newCfg) {
+                bool needReloadPacks = false;
+                fs::path cfgPath;
+                {
+                    std::lock_guard<std::mutex> lock(app->stateMutex);
+                    const auto oldCfg = app->engine.config();
+                    needReloadPacks = (oldCfg.enableCsPack != newCfg.enableCsPack) ||
+                                      (oldCfg.enableExtPack != newCfg.enableExtPack) ||
+                                      (oldCfg.enableProPack != newCfg.enableProPack) ||
+                                      (oldCfg.enableEnPack != newCfg.enableEnPack) ||
+                                      (oldCfg.enableCustomDicts != newCfg.enableCustomDicts);
+                    app->engine.config() = newCfg;
+                    if (oldCfg.scheme != newCfg.scheme && app->engine.isComposing()) {
+                        app->engine.resetComposition();
+                        app->shouldShowCandidates = false;
+                    }
+                    app->forceStatusRedraw = true;
+                    cfgPath = app->engine.userDict().configPath();
+                }
+                if (needReloadPacks) {
+                    app->reloadExtraDictionaries();
+                }
+                liteime::engine::UserDict::saveConfig(cfgPath, newCfg);
+                app->syncUiFromState();
+            };
+            auto onCmd = [app](liteime::host::SettingsQuickCommand cmd) {
+                if (cmd == liteime::host::SettingsQuickCommand::OpenQuickInput) {
+                    app->handleAction(liteime::host::HostAction::OpenQuickInputManager);
+                } else if (cmd == liteime::host::SettingsQuickCommand::OpenCustomDictFolder) {
+                    app->handleAction(liteime::host::HostAction::OpenCustomDictFolder);
+                }
+            };
+            liteime::host::showSettingsCenterDialog(nullptr, cfgCopy, onApply, onCmd, &app->settingsHwnd);
             return 0;
         }
         case liteime::host::WM_APP_TRAY_CALLBACK:

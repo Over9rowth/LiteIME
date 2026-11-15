@@ -13,6 +13,7 @@ constexpr UINT WM_APP_REMOVE_USER_WORD = WM_APP + 107;
 constexpr UINT WM_APP_STATUS_POS_CHANGED = WM_APP + 108;
 constexpr UINT WM_APP_CANDIDATE_CLICK = WM_APP + 109;
 constexpr UINT WM_APP_CANDIDATE_PAGE = WM_APP + 110;
+constexpr UINT WM_APP_OPEN_SETTINGS = WM_APP + 111;
 
 enum class HostAction : WPARAM {
     ToggleChineseEnglish = 1,
@@ -47,6 +48,12 @@ enum class HostAction : WPARAM {
     ToggleMixedEnglish = 37,
     TogglePackCommonEn = 38,
     ToggleLooseInitial = 39,
+    OpenSettings = 40,
+    SetSchemeQuanpin = 41,
+    SetSchemeXiaohe = 42,
+    SetSchemeMicrosoft = 43,
+    SetSchemeZiranma = 44,
+    SetSchemeSogou = 45,
 };
 
 inline UINT queryDpiForWindow(HWND hwnd) {

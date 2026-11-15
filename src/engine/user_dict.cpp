@@ -1,6 +1,7 @@
 #include "engine/user_dict.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
@@ -135,7 +136,15 @@ bool UserDict::load(const std::filesystem::path& path) {
 
     if (!pinsPath().empty()) loadPins(pinsPath());
     if (!quickInputsPath().empty()) loadQuickInputs(quickInputsPath());
+    if (!bigramsPath().empty()) loadBigrams(bigramsPath());
     return loadedMain;
+}
+
+bool UserDict::saveIfDirty() const {
+    bool ok = true;
+    if (dirty_) ok = save() && ok;
+    if (bigramDirty_) ok = saveBigrams() && ok;
+    return ok;
 }
 
 bool UserDict::save() const {
@@ -281,6 +290,86 @@ std::filesystem::path UserDict::quickInputsPath() const {
 
 std::filesystem::path UserDict::configPath() const {
     return path_.empty() ? std::filesystem::path{} : (path_.parent_path() / "config.ini");
+}
+
+std::filesystem::path UserDict::bigramsPath() const {
+    return path_.empty() ? std::filesystem::path{} : (path_.parent_path() / "user_bigram.tsv");
+}
+
+void UserDict::recordBigram(std::string_view prevWord, std::string_view curWord) {
+    if (prevWord.empty() || curWord.empty() || prevWord == curWord) return;
+    if (prevWord.size() > 24 || curWord.size() > 24) return;
+    auto& inner = bigrams_[std::string(prevWord)];
+    auto it = inner.find(std::string(curWord));
+    if (it != inner.end()) {
+        if (it->second < 1000000u) ++(it->second);
+    } else {
+        if (inner.size() >= 64) {
+            auto minIt = std::min_element(inner.begin(), inner.end(), [](const auto& a, const auto& b) {
+                return a.second < b.second;
+            });
+            if (minIt != inner.end() && minIt->second <= 2) {
+                inner.erase(minIt);
+            } else if (minIt != inner.end()) {
+                return;
+            }
+        }
+        inner.emplace(std::string(curWord), 1u);
+    }
+    bigramDirty_ = true;
+}
+
+double UserDict::getBigramBonus(std::string_view prevWord, std::string_view curWord) const {
+    if (prevWord.empty() || curWord.empty()) return 0.0;
+    auto it = bigrams_.find(std::string(prevWord));
+    if (it == bigrams_.end()) return 0.0;
+    auto innerIt = it->second.find(std::string(curWord));
+    if (innerIt == it->second.end()) return 0.0;
+    // Smooth logarithmic boost in [1.1, 4.5] comparable to dictionary log-freq scale
+    return std::min(4.5, 1.1 + std::log(1.0 + static_cast<double>(innerIt->second)) * 0.95);
+}
+
+bool UserDict::loadBigrams(const std::filesystem::path& path) {
+    bigrams_.clear();
+    bigramDirty_ = false;
+    std::ifstream ifs(path);
+    if (!ifs) return false;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        size_t t1 = line.find('\t');
+        if (t1 == std::string::npos) continue;
+        size_t t2 = line.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        std::string prevW = line.substr(0, t1);
+        std::string curW = line.substr(t1 + 1, t2 - t1 - 1);
+        uint32_t cnt = 1;
+        try {
+            cnt = static_cast<uint32_t>(std::stoul(line.substr(t2 + 1)));
+        } catch (...) {
+            continue;
+        }
+        if (!prevW.empty() && !curW.empty() && cnt > 0) {
+            bigrams_[std::move(prevW)][std::move(curW)] = cnt;
+        }
+    }
+    return true;
+}
+
+bool UserDict::saveBigrams() const {
+    auto p = bigramsPath();
+    if (p.empty()) return false;
+    std::ostringstream oss;
+    oss << "# LiteIME User Bigrams (prevWord\\tcurWord\\tcount)\n";
+    for (const auto& [prevW, inner] : bigrams_) {
+        for (const auto& [curW, cnt] : inner) {
+            oss << prevW << '\t' << curW << '\t' << cnt << '\n';
+        }
+    }
+    const bool ok = atomicWriteTextFile(p, oss.str());
+    if (ok) bigramDirty_ = false;
+    return ok;
 }
 
 std::string UserDict::normalizePinKey(std::string_view rawInput) {
@@ -504,6 +593,8 @@ bool UserDict::loadConfig(const std::filesystem::path& path, EngineConfig& cfg) 
         } else if (k == "squareFrame") cfg.squareFrame = asBool(v);
         else if (k == "inlinePreedit") {
             try { cfg.inlinePreedit = static_cast<InlinePreeditMode>(std::clamp(std::stoi(std::string(v)), 0, 2)); } catch (...) {}
+        } else if (k == "scheme") {
+            try { cfg.scheme = static_cast<PinyinScheme>(std::clamp(std::stoi(std::string(v)), 0, 4)); } catch (...) {}
         } else if (k == "fuzzy.zh_z") cfg.fuzzy.zh_z = asBool(v);
         else if (k == "fuzzy.ch_c") cfg.fuzzy.ch_c = asBool(v);
         else if (k == "fuzzy.sh_s") cfg.fuzzy.sh_s = asBool(v);
@@ -546,6 +637,7 @@ bool UserDict::saveConfig(const std::filesystem::path& path, const EngineConfig&
         << "layout=" << static_cast<int>(cfg.layout) << '\n'
         << "squareFrame=" << b(cfg.squareFrame) << '\n'
         << "inlinePreedit=" << static_cast<int>(cfg.inlinePreedit) << '\n'
+        << "scheme=" << static_cast<int>(cfg.scheme) << '\n'
         << "fuzzy.zh_z=" << b(cfg.fuzzy.zh_z) << '\n'
         << "fuzzy.ch_c=" << b(cfg.fuzzy.ch_c) << '\n'
         << "fuzzy.sh_s=" << b(cfg.fuzzy.sh_s) << '\n'
@@ -563,8 +655,10 @@ bool UserDict::saveConfig(const std::filesystem::path& path, const EngineConfig&
 void UserDict::clear() {
     entries_.clear();
     pins_.clear();
+    bigrams_.clear();
     quickInputs_.clear();
     dirty_ = false;
+    bigramDirty_ = false;
 }
 
 } // namespace liteime::engine

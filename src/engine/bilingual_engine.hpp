@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/config.hpp"
+#include "engine/bigram_model.hpp"
 #include "engine/binary_dict.hpp"
 #include "engine/pinyin_table.hpp"
 #include "engine/user_dict.hpp"
@@ -57,6 +58,9 @@ public:
     UserDict& userDict() { return userDict_; }
     const UserDict& userDict() const { return userDict_; }
 
+    BigramModel& bigramModel() { return bigram_; }
+    const BigramModel& bigramModel() const { return bigram_; }
+
     EngineConfig& config() { return config_; }
     const EngineConfig& config() const { return config_; }
 
@@ -99,23 +103,29 @@ private:
 
     void rebuildCandidates();
     std::string buildWholeSentence(const SegmentPath& path, double& outScore) const;
+    double contextBigramBonus(std::string_view prevWord, std::string_view curWord) const;
     std::string mapPunctuation(uint32_t vk, bool shift) const;
     std::string highlightedCandidateText() const;
     KeyActionResult buildComposeResult() const;
     KeyActionResult commitCandidateAtGlobalIndex(size_t idx);
-    KeyActionResult finalizeCommit(const std::string& text, bool resetModeFlags = true, bool isQuickInput = false);
+    KeyActionResult finalizeCommit(const std::string& text,
+                                   bool resetModeFlags = true,
+                                   bool isQuickInput = false,
+                                   std::string nextBigramCtx = {});
     void flushPendingLearnedPhrase();
     void undoLastPrefixStep();
 
     const BinaryDict* dict_ = nullptr;
     std::vector<const BinaryDict*> extraDicts_;
     UserDict userDict_;
+    BigramModel bigram_;
     EngineConfig config_;
 
     std::string rawBuffer_;
     std::string segmentedHeader_;
     std::string committedPrefixWords_;
     std::string committedPrefixPinyin_;
+    std::string lastCommittedWord_;
     std::vector<PrefixStep> prefixSteps_;
     std::vector<CandidateItem> candidates_;
     int currentPage_ = 0;

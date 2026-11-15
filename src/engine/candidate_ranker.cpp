@@ -78,6 +78,9 @@ void BilingualEngine::rebuildCandidates() {
     std::vector<ScoredCandidate> scored;
     std::unordered_map<std::string, size_t> seenIdx;
 
+    const std::string bigramCtxWord =
+        !prefixSteps_.empty() ? prefixSteps_.back().word : std::string{};
+
     auto addScored = [&](std::string text,
                          std::string comment,
                          std::string matchedKey,
@@ -88,6 +91,12 @@ void BilingualEngine::rebuildCandidates() {
                          uint32_t tier,
                          int pinnedSlot = -1) {
         if (text.empty()) return;
+        if (!bigramCtxWord.empty() &&
+            (kind == CandidateKind::ChinesePhrase ||
+             kind == CandidateKind::ChineseJianpin ||
+             kind == CandidateKind::ChineseSentence)) {
+            defaultScore += contextBigramBonus(bigramCtxWord, text) * 14.0;
+        }
         auto it = seenIdx.find(text);
         if (it != seenIdx.end()) {
             auto& cur = scored[it->second];
@@ -144,8 +153,8 @@ void BilingualEngine::rebuildCandidates() {
         }
     }
 
-    // 3. Pinyin segmentation & Chinese candidates
-    auto paths = PinyinTable::segment(lowerBuf, 3);
+    // 3. Pinyin segmentation & Chinese candidates (supports Quanpin & Shuangpin)
+    auto paths = PinyinTable::segmentScheme(lowerBuf, config_.scheme, 3);
     bool hasFullExactChinese = false;
     bool hasFuzzyMatches = false;
 
@@ -170,6 +179,14 @@ void BilingualEngine::rebuildCandidates() {
                 return out;
             };
             if (!hdr.empty() && stripApos(hdr) == stripApos(rawBuffer_)) {
+                if (config_.scheme != PinyinScheme::Quanpin) {
+                    std::string decoded = path.preeditDisplay();
+                    if (!decoded.empty() && decoded != hdr) {
+                        hdr += " [";
+                        hdr += decoded;
+                        hdr += "]";
+                    }
+                }
                 return hdr;
             }
             return std::string{};
@@ -506,7 +523,8 @@ void BilingualEngine::rebuildCandidates() {
         std::all_of(paths[0].tokens.begin(), paths[0].tokens.end() - 1,
                     [](const SyllableToken& t) { return !t.isPartial; }) &&
         PinyinTable::isSyllablePrefix(paths[0].tokens.back().text);
-    if (config_.typoCorrection && hasAnyDict() && lowerBuf.size() >= 3) {
+    if (config_.typoCorrection && config_.scheme == PinyinScheme::Quanpin &&
+        hasAnyDict() && lowerBuf.size() >= 3) {
         const bool hasBrokenPartial = paths.empty() || (!isInProgressValidPrefix && std::any_of(
             paths[0].tokens.begin(), paths[0].tokens.end(), [](const SyllableToken& t) { return t.isPartial; }));
         if (hasBrokenPartial) {

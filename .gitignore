@@ -1,5 +1,6 @@
 # Build outputs & deploy binaries
 build/
+build32/
 dist/
 *.old.*
 *.pdb

@@ -84,6 +84,13 @@ std::vector<DictCandidate> BilingualEngine::queryEnglishPrefixAll(std::string_vi
     });
 }
 
+double BilingualEngine::contextBigramBonus(std::string_view prevWord, std::string_view curWord) const {
+    if (prevWord.empty() || curWord.empty()) return 0.0;
+    double bStatic = bigram_.scoreTransition(prevWord, curWord);
+    double bUser = userDict_.getBigramBonus(prevWord, curWord);
+    return bStatic + bUser;
+}
+
 std::string BilingualEngine::buildWholeSentence(const SegmentPath& path, double& outScore) const {
     const size_t n = path.tokens.size();
     if (n == 0 || !hasAnyDict()) {
@@ -91,16 +98,31 @@ std::string BilingualEngine::buildWholeSentence(const SegmentPath& path, double&
         return {};
     }
 
+    constexpr size_t kBeamWidth = 4;
+    constexpr size_t kEdgeTopK = 4;
+
     struct DpNode {
         double score = -1e18;
-        int prev = -1;
+        int prevNode = -1;
+        int prevBeam = -1;
         std::string word;
     };
-    std::vector<DpNode> dp(n + 1);
-    dp[0].score = 0.0;
+    struct EdgeOption {
+        std::string word;
+        double baseScore = 0.0;
+    };
+
+    std::vector<std::vector<DpNode>> dp(n + 1);
+    std::string initialCtx;
+    if (!prefixSteps_.empty()) {
+        initialCtx = prefixSteps_.back().word;
+    } else if (!lastCommittedWord_.empty()) {
+        initialCtx = lastCommittedWord_;
+    }
+    dp[0].push_back(DpNode{0.0, -1, -1, initialCtx});
 
     for (size_t i = 0; i < n; ++i) {
-        if (dp[i].score <= -1e17) continue;
+        if (dp[i].empty()) continue;
 
         const size_t maxSpan = std::min<size_t>(8, n - i);
         for (size_t span = maxSpan; span >= 1; --span) {
@@ -120,33 +142,40 @@ std::string BilingualEngine::buildWholeSentence(const SegmentPath& path, double&
                 continue;
             }
 
-            std::string bestWord;
-            uint32_t bestFreq = 0;
+            std::vector<EdgeOption> options;
+            auto pushOption = [&options](std::string word, uint32_t freq, double cohesionBonus) {
+                if (word.empty()) return;
+                for (const auto& existing : options) {
+                    if (existing.word == word) return;
+                }
+                double sc = detail::freqToLogScore(freq) + cohesionBonus;
+                options.push_back(EdgeOption{std::move(word), sc});
+            };
+            const double cohesionBonus = (span > 1) ? (static_cast<double>(span - 1) * 0.6) : 0.0;
 
             if (!hasPartial) {
                 for (const auto& u : userDict_.lookup(key)) {
                     uint32_t tier = UserDict::tierForCount(u.count);
                     if (tier >= 1) {
-                        bestWord = u.word;
-                        bestFreq = 500000u + tier * 200000u;
-                        break;
+                        pushOption(u.word, 500000u + tier * 200000u, cohesionBonus);
+                        if (options.size() >= kEdgeTopK) break;
                     }
                 }
             }
 
-            if (bestWord.empty()) {
+            if (options.size() < kEdgeTopK) {
                 if (!hasPartial) {
-                    auto exactHits = queryExactAll(key, 1);
-                    if (!exactHits.empty()) {
-                        bestWord = exactHits[0].word;
-                        bestFreq = exactHits[0].freq;
-                    } else if (span == 1) {
+                    auto exactHits = queryExactAll(key, kEdgeTopK);
+                    for (const auto& h : exactHits) {
+                        pushOption(h.word, h.freq, cohesionBonus);
+                        if (options.size() >= kEdgeTopK) break;
+                    }
+                    if (options.empty() && span == 1) {
                         auto fuzzies = PinyinTable::expandFuzzy(path.tokens[i].text, config_.fuzzy);
                         for (size_t f = 1; f < fuzzies.size(); ++f) {
-                            auto fHits = queryExactAll(fuzzies[f], 1);
-                            if (!fHits.empty() && fHits[0].freq > bestFreq) {
-                                bestWord = fHits[0].word;
-                                bestFreq = fHits[0].freq / 2;
+                            auto fHits = queryExactAll(fuzzies[f], 2);
+                            for (const auto& fh : fHits) {
+                                pushOption(fh.word, std::max<uint32_t>(1, fh.freq / 2), cohesionBonus);
                             }
                         }
                     }
@@ -165,56 +194,87 @@ std::string BilingualEngine::buildWholeSentence(const SegmentPath& path, double&
                         std::string_view pView(h.pinyin);
                         if (pView.substr(0, lastSp) != exactPrefix) continue;
                         if (!pView.substr(lastSp + 1).starts_with(tailPrefix)) continue;
-                        bestWord = h.word;
-                        bestFreq = std::max<uint32_t>(1, h.freq / 2);
-                        break;
+                        pushOption(h.word, std::max<uint32_t>(1, h.freq / 2), cohesionBonus);
+                        if (options.size() >= 2) break;
                     }
                 } else {
                     auto pHits = queryPinyinPrefixAll(path.tokens[i].text, 12);
                     for (const auto& h : pHits) {
                         if (detail::countSyllablesInPinyin(h.pinyin) == 1) {
-                            bestWord = h.word;
-                            bestFreq = std::max<uint32_t>(1, h.freq / 4);
-                            break;
+                            pushOption(h.word, std::max<uint32_t>(1, h.freq / 4), cohesionBonus);
+                            if (options.size() >= 2) break;
                         }
                     }
                 }
             }
 
-            if (bestWord.empty()) continue;
+            if (options.empty()) continue;
 
-            // Multi-syllable phrases naturally avoid paying multiple unigram penalties;
-            // add a modest cohesion bonus for legitimate multi-char words.
-            double cohesionBonus = (span > 1) ? (static_cast<double>(span - 1) * 0.6) : 0.0;
-            double edgeScore = detail::freqToLogScore(bestFreq) + cohesionBonus;
-            if (dp[i].score + edgeScore > dp[i + span].score) {
-                dp[i + span].score = dp[i].score + edgeScore;
-                dp[i + span].prev = static_cast<int>(i);
-                dp[i + span].word = std::move(bestWord);
+            auto& nextBeam = dp[i + span];
+            for (size_t bIdx = 0; bIdx < dp[i].size(); ++bIdx) {
+                const auto& prevState = dp[i][bIdx];
+                for (const auto& opt : options) {
+                    const double transBonus = prevState.word.empty()
+                        ? 0.0
+                        : contextBigramBonus(prevState.word, opt.word);
+                    const double candScore = prevState.score + opt.baseScore + transBonus;
+
+                    // Keep only distinct last-words in beam (or overwrite weaker path with same last-word)
+                    bool replaced = false;
+                    for (auto& existing : nextBeam) {
+                        if (existing.word == opt.word) {
+                            if (candScore > existing.score) {
+                                existing.score = candScore;
+                                existing.prevNode = static_cast<int>(i);
+                                existing.prevBeam = static_cast<int>(bIdx);
+                            }
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if (!replaced) {
+                        nextBeam.push_back(DpNode{candScore, static_cast<int>(i), static_cast<int>(bIdx), opt.word});
+                    }
+                }
+            }
+            std::sort(nextBeam.begin(), nextBeam.end(), [](const DpNode& a, const DpNode& b) {
+                return a.score > b.score;
+            });
+            if (nextBeam.size() > kBeamWidth) {
+                nextBeam.resize(kBeamWidth);
             }
         }
 
-        // Fallback if token couldn't match anything at all
-        if (dp[i + 1].score <= -1e17) {
-            dp[i + 1].score = dp[i].score - 100.0;
-            dp[i + 1].prev = static_cast<int>(i);
-            dp[i + 1].word = path.tokens[i].text;
+        // Fallback if nothing could advance out of node i
+        if (dp[i + 1].empty()) {
+            const auto& prevState = dp[i][0];
+            dp[i + 1].push_back(DpNode{
+                prevState.score - 100.0,
+                static_cast<int>(i),
+                0,
+                path.tokens[i].text});
         }
     }
 
-    if (dp[n].score <= -1e17) {
+    if (dp[n].empty()) {
         outScore = -1e9;
         return {};
     }
 
     std::vector<std::string> parts;
-    for (int cur = static_cast<int>(n); cur > 0; cur = dp[cur].prev) {
-        parts.push_back(dp[cur].word);
+    int curNode = static_cast<int>(n);
+    int curBeam = 0;
+    while (curNode > 0) {
+        const auto& st = dp[curNode][curBeam];
+        parts.push_back(st.word);
+        curNode = st.prevNode;
+        curBeam = st.prevBeam;
+        if (curBeam < 0) break;
     }
     std::reverse(parts.begin(), parts.end());
     std::string sentence;
     for (const auto& p : parts) sentence += p;
-    outScore = dp[n].score;
+    outScore = dp[n][0].score;
     return sentence;
 }
 

@@ -195,9 +195,29 @@ void TrayIcon::showContextMenu(const EngineConfig& cfg) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
 
+    AppendMenuW(menu, MF_STRING,
+                static_cast<UINT_PTR>(HostAction::OpenSettings),
+                L"\u8bbe\u7f6e\u4e2d\u5fc3...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
     AppendMenuW(menu, MF_STRING | (cfg.chineseMode ? MF_CHECKED : 0),
                 static_cast<UINT_PTR>(HostAction::ToggleChineseEnglish),
                 L"\u4e2d\u6587\u6a21\u5f0f (Shift)");
+
+    HMENU schemeMenu = CreatePopupMenu();
+    if (schemeMenu) {
+        AppendMenuW(schemeMenu, MF_STRING | (cfg.scheme == PinyinScheme::Quanpin ? MF_CHECKED : 0),
+                    static_cast<UINT_PTR>(HostAction::SetSchemeQuanpin), L"\u5168\u62fc (\u9ed8\u8ba4)");
+        AppendMenuW(schemeMenu, MF_STRING | (cfg.scheme == PinyinScheme::Xiaohe ? MF_CHECKED : 0),
+                    static_cast<UINT_PTR>(HostAction::SetSchemeXiaohe), L"\u5c0f\u9e64\u53cc\u62fc");
+        AppendMenuW(schemeMenu, MF_STRING | (cfg.scheme == PinyinScheme::Microsoft ? MF_CHECKED : 0),
+                    static_cast<UINT_PTR>(HostAction::SetSchemeMicrosoft), L"\u5fae\u8f6f\u53cc\u62fc");
+        AppendMenuW(schemeMenu, MF_STRING | (cfg.scheme == PinyinScheme::Ziranma ? MF_CHECKED : 0),
+                    static_cast<UINT_PTR>(HostAction::SetSchemeZiranma), L"\u81ea\u7136\u7801\u53cc\u62fc");
+        AppendMenuW(schemeMenu, MF_STRING | (cfg.scheme == PinyinScheme::Sogou ? MF_CHECKED : 0),
+                    static_cast<UINT_PTR>(HostAction::SetSchemeSogou), L"\u641c\u72d7\u53cc\u62fc");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(schemeMenu), L"\u62fc\u97f3\u65b9\u6848");
+    }
     AppendMenuW(menu, MF_STRING | (cfg.chinesePunct ? MF_CHECKED : 0),
                 static_cast<UINT_PTR>(HostAction::TogglePunct),
                 L"\u4e2d\u6587\u6807\u70b9");

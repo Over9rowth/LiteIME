@@ -7,9 +7,10 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-$root = Split-Path -Parent $PSScriptRoot
-$dll  = Join-Path $root 'dist\LiteIME64.dll'
-$tip  = "0804:{A9B4C21E-7D3A-4F8B-9C12-5E7A1D3B8C40}{B8C5D32F-8E4B-409C-AD23-6F8B2E4C9D51}"
+$root  = Split-Path -Parent $PSScriptRoot
+$dll64 = Join-Path $root 'dist\LiteIME64.dll'
+$dll32 = Join-Path $root 'dist\LiteIME32.dll'
+$tip   = "0804:{A9B4C21E-7D3A-4F8B-9C12-5E7A1D3B8C40}{B8C5D32F-8E4B-409C-AD23-6F8B2E4C9D51}"
 
 Get-Process -Name LiteIMEHost -ErrorAction SilentlyContinue | Stop-Process -Force
 
@@ -30,10 +31,17 @@ if ($zh -and ($zh.InputMethodTips -contains $tip)) {
     Set-WinUserLanguageList $langs -Force
 }
 
-if (Test-Path $dll) {
-    $proc = Start-Process -FilePath "regsvr32.exe" -ArgumentList "/s /u `"$dll`"" -Wait -PassThru
+if (Test-Path $dll64) {
+    $proc = Start-Process -FilePath "regsvr32.exe" -ArgumentList "/s /u `"$dll64`"" -Wait -PassThru
     if ($proc.ExitCode -ne 0) {
-        Write-Warning "regsvr32 卸载返回退出码: $($proc.ExitCode)（若 DLL 仍被其他应用加载，注销或重启后可清理）"
+        Write-Warning "regsvr32 (64位) 卸载返回退出码: $($proc.ExitCode)（若 DLL 仍被其他应用加载，注销或重启后可清理）"
+    }
+}
+$regsvr32Wow64 = Join-Path $env:SystemRoot 'SysWOW64\regsvr32.exe'
+if ((Test-Path $dll32) -and (Test-Path $regsvr32Wow64)) {
+    $proc32 = Start-Process -FilePath $regsvr32Wow64 -ArgumentList "/s /u `"$dll32`"" -Wait -PassThru
+    if ($proc32.ExitCode -ne 0) {
+        Write-Warning "regsvr32 (32位) 卸载返回退出码: $($proc32.ExitCode)"
     }
 }
 

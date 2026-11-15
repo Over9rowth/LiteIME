@@ -1,12 +1,15 @@
 #include "host/candidate_window.hpp"
+#include "host/settings_dialog.hpp"
 #include "host/status_window.hpp"
 #include "engine/bilingual_engine.hpp"
 #include "engine/binary_dict.hpp"
 
 #include <windows.h>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <thread>
 
 #define CHECK(cond) \
     do { \
@@ -156,6 +159,48 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     candWin.hide();
     CHECK(IsWindowVisible(candWin.hwnd()) == FALSE);
+
+    // Exercise Settings Center Dialog creation, control population, Apply/OK readback, and clean teardown
+    {
+        liteime::EngineConfig dlgCfg{};
+        dlgCfg.scheme = liteime::PinyinScheme::Xiaohe;
+        dlgCfg.pageSize = 7;
+        dlgCfg.skin = liteime::SkinTheme::MatchaJade;
+        dlgCfg.fuzzy.zh_z = true;
+
+        HWND trackedHwnd = nullptr;
+        bool onApplyCalled = false;
+        liteime::EngineConfig appliedCfg{};
+
+        std::thread closer([&] {
+            for (int i = 0; i < 300; ++i) {
+                HWND h = FindWindowW(L"LiteIME_SettingsCenter", nullptr);
+                if (h && IsWindow(h) && IsWindowVisible(h)) {
+                    Sleep(40);
+                    PostMessageW(h, WM_COMMAND, MAKEWPARAM(2062, BN_CLICKED), 0);
+                    return;
+                }
+                Sleep(10);
+            }
+        });
+
+        bool accepted = liteime::host::showSettingsCenterDialog(
+            nullptr, dlgCfg,
+            [&](const liteime::EngineConfig& c) {
+                onApplyCalled = true;
+                appliedCfg = c;
+            },
+            nullptr,
+            &trackedHwnd);
+        if (closer.joinable()) closer.join();
+
+        CHECK(accepted);
+        CHECK(onApplyCalled);
+        CHECK(appliedCfg.scheme == liteime::PinyinScheme::Xiaohe);
+        CHECK(appliedCfg.pageSize == 7);
+        CHECK(appliedCfg.skin == liteime::SkinTheme::MatchaJade);
+        CHECK(appliedCfg.fuzzy.zh_z);
+    }
 
     CoUninitialize();
     std::cout << "UI Window Smoke Test PASSED!\n";
