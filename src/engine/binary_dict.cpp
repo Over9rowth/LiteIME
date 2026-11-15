@@ -104,6 +104,40 @@ void BinaryDict::unload() {
     strings_ = nullptr;
 }
 
+bool BinaryDict::validateAndBindPointers() {
+    if (!base_ || size_ < sizeof(DictHeader)) {
+        unload();
+        return false;
+    }
+    header_ = reinterpret_cast<const DictHeader*>(base_);
+    if (header_->magic != 0x4C494D31 || header_->version != 1) {
+        unload();
+        return false;
+    }
+
+    auto fitsTable = [this](uint64_t offset, uint64_t count, size_t elemSize) {
+        if (offset > size_) return false;
+        const uint64_t avail = size_ - offset;
+        return elemSize > 0 && count <= avail / elemSize;
+    };
+    const bool ok =
+        fitsTable(header_->phraseOffset, header_->phraseCount, sizeof(PhraseEntry)) &&
+        fitsTable(header_->jianpinOffset, header_->jianpinCount, sizeof(JianpinEntry)) &&
+        fitsTable(header_->englishOffset, header_->englishCount, sizeof(EnglishEntry)) &&
+        header_->stringPoolOffset <= size_ &&
+        header_->stringPoolSize <= (size_ - header_->stringPoolOffset);
+    if (!ok) {
+        unload();
+        return false;
+    }
+
+    phrases_ = reinterpret_cast<const PhraseEntry*>(base_ + header_->phraseOffset);
+    jianpin_ = reinterpret_cast<const JianpinEntry*>(base_ + header_->jianpinOffset);
+    english_ = reinterpret_cast<const EnglishEntry*>(base_ + header_->englishOffset);
+    strings_ = reinterpret_cast<const char*>(base_ + header_->stringPoolOffset);
+    return true;
+}
+
 bool BinaryDict::loadFile(const std::filesystem::path& path) {
     unload();
 #ifdef _WIN32
@@ -146,26 +180,7 @@ bool BinaryDict::loadFile(const std::filesystem::path& path) {
     size_ = ownedBuffer_.size();
 #endif
 
-    header_ = reinterpret_cast<const DictHeader*>(base_);
-    if (header_->magic != 0x4C494D31 || header_->version != 1) {
-        unload();
-        return false;
-    }
-
-    const uint64_t minPhraseEnd = header_->phraseOffset + uint64_t(header_->phraseCount) * sizeof(PhraseEntry);
-    const uint64_t minJianpinEnd = header_->jianpinOffset + uint64_t(header_->jianpinCount) * sizeof(JianpinEntry);
-    const uint64_t minEngEnd = header_->englishOffset + uint64_t(header_->englishCount) * sizeof(EnglishEntry);
-    const uint64_t minStrEnd = header_->stringPoolOffset + header_->stringPoolSize;
-    if (minPhraseEnd > size_ || minJianpinEnd > size_ || minEngEnd > size_ || minStrEnd > size_) {
-        unload();
-        return false;
-    }
-
-    phrases_ = reinterpret_cast<const PhraseEntry*>(base_ + header_->phraseOffset);
-    jianpin_ = reinterpret_cast<const JianpinEntry*>(base_ + header_->jianpinOffset);
-    english_ = reinterpret_cast<const EnglishEntry*>(base_ + header_->englishOffset);
-    strings_ = reinterpret_cast<const char*>(base_ + header_->stringPoolOffset);
-    return true;
+    return validateAndBindPointers();
 }
 
 bool BinaryDict::loadFromMemory(std::vector<uint8_t> buffer) {
@@ -174,16 +189,7 @@ bool BinaryDict::loadFromMemory(std::vector<uint8_t> buffer) {
     ownedBuffer_ = std::move(buffer);
     base_ = ownedBuffer_.data();
     size_ = ownedBuffer_.size();
-    header_ = reinterpret_cast<const DictHeader*>(base_);
-    if (header_->magic != 0x4C494D31 || header_->version != 1) {
-        unload();
-        return false;
-    }
-    phrases_ = reinterpret_cast<const PhraseEntry*>(base_ + header_->phraseOffset);
-    jianpin_ = reinterpret_cast<const JianpinEntry*>(base_ + header_->jianpinOffset);
-    english_ = reinterpret_cast<const EnglishEntry*>(base_ + header_->englishOffset);
-    strings_ = reinterpret_cast<const char*>(base_ + header_->stringPoolOffset);
-    return true;
+    return validateAndBindPointers();
 }
 
 std::string_view BinaryDict::strAt(uint32_t off) const {
@@ -225,7 +231,7 @@ std::vector<DictCandidate> BinaryDict::lookupPinyinPrefix(std::string_view pinyi
 
     std::vector<DictCandidate> out;
     size_t scanned = 0;
-    constexpr size_t kMaxScan = 256;
+    constexpr size_t kMaxScan = 4096;
     while (it != phrases_ + header_->phraseCount && scanned < kMaxScan) {
         std::string_view py = strAt(it->pinyinOff);
         if (!py.starts_with(pinyinPrefix)) break;
@@ -255,6 +261,10 @@ std::vector<DictCandidate> BinaryDict::lookupJianpin(std::string_view initials, 
 
     std::vector<DictCandidate> out;
     while (it != jianpin_ + header_->jianpinCount && strAt(it->initialsOff) == initials) {
+        if (it->phraseIdx >= header_->phraseCount) {
+            ++it;
+            continue;
+        }
         const PhraseEntry& p = phrases_[it->phraseIdx];
         out.push_back(DictCandidate{
             std::string(strAt(p.wordOff)),

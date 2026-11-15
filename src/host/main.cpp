@@ -1,5 +1,6 @@
 #include "common/config.hpp"
 #include "common/ipc_protocol.hpp"
+#include "common/utf.hpp"
 #include "engine/bilingual_engine.hpp"
 #include "engine/binary_dict.hpp"
 #include "host/candidate_window.hpp"
@@ -49,6 +50,8 @@ struct HostApp {
     int lastCaretY = 300;
     int lastCaretH = 22;
     uint64_t activeConnId = 0;
+    uint32_t activeClientPid = 0;
+    uint64_t activeTargetHwnd = 0;
     bool imeActive = false;
     bool shouldShowCandidates = false;
     bool forceStatusRedraw = false;
@@ -267,6 +270,8 @@ struct HostApp {
             if (connId != 0 && connId == activeConnId) {
                 imeActive = false;
                 activeConnId = 0;
+                activeClientPid = 0;
+                activeTargetHwnd = 0;
                 shouldShowCandidates = false;
                 engine.notifyFocusChanged(false);
                 needUi = true;
@@ -277,13 +282,64 @@ struct HostApp {
         }
     }
 
-    void handleIpc(const liteime::ipc::Request& req, liteime::ipc::Response& resp, uint64_t connId) {
+    static bool isForegroundQuickInputAuthorized(uint32_t clientPid, uint64_t reqHwnd) {
+        if (clientPid == 0 || reqHwnd == 0) return false;
+        HWND targetHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(reqHwnd));
+        if (!IsWindow(targetHwnd)) return false;
+        HWND fg = GetForegroundWindow();
+        if (!fg) return false;
+        DWORD fgPid = 0;
+        DWORD reqPid = 0;
+        GetWindowThreadProcessId(fg, &fgPid);
+        GetWindowThreadProcessId(targetHwnd, &reqPid);
+        return fgPid == clientPid && reqPid == clientPid;
+    }
+
+    static void fillResponseFromAction(const liteime::engine::KeyActionResult& act,
+                                       const liteime::EngineConfig& cfgSnap,
+                                       bool composing,
+                                       liteime::ipc::Response& resp) {
+        resp.magic = liteime::ipc::kProtocolMagic;
+        resp.version = liteime::ipc::kProtocolVersion;
+        resp.consumed = act.consumed ? 1 : 0;
+        resp.isEnglish = cfgSnap.chineseMode ? 0 : 1;
+        resp.isFullWidth = cfgSnap.fullWidth ? 1 : 0;
+        resp.isCnPunct = cfgSnap.chinesePunct ? 1 : 0;
+        resp.isComposing = composing ? 1 : 0;
+        resp.preeditLen = 0;
+        resp.commitLen = 0;
+        resp.caretPos = 0;
+
+        if (!act.preeditText.empty()) {
+            size_t len = liteime::copyUtf8Bounded(act.preeditText, resp.preedit, sizeof(resp.preedit));
+            resp.preeditLen = static_cast<uint16_t>(len);
+            resp.caretPos = resp.preeditLen;
+        }
+        if (!act.commitText.empty()) {
+            size_t len = liteime::copyUtf8Bounded(act.commitText, resp.commit, sizeof(resp.commit));
+            resp.commitLen = static_cast<uint16_t>(len);
+        }
+    }
+
+    void pushNotifyResponse(uint32_t targetPid, uint64_t targetHwnd, const liteime::ipc::Response& resp) {
+        if (targetPid == 0) return;
+        liteime::ipc::NotifyPacket pkt{};
+        pkt.magic = liteime::ipc::kProtocolMagic;
+        pkt.type = static_cast<uint16_t>(liteime::ipc::NotifyType::ApplyResponse);
+        pkt.targetHwnd = targetHwnd;
+        pkt.response = resp;
+        pipeServer.sendNotify(targetPid, pkt);
+    }
+
+    void handleIpc(const liteime::ipc::Request& req, liteime::ipc::Response& resp,
+                   uint64_t connId, uint32_t clientPid) {
         resp.magic = liteime::ipc::kProtocolMagic;
         resp.version = liteime::ipc::kProtocolVersion;
 
         liteime::engine::KeyActionResult act{};
         bool needUi = false;
         bool openQuickDlg = false;
+        bool composing = false;
         liteime::EngineConfig cfgSnap;
 
         {
@@ -294,13 +350,18 @@ struct HostApp {
                     break;
                 case liteime::ipc::MsgType::KeyEvent:
                     activeConnId = connId;
+                    activeClientPid = clientPid;
+                    if (req.hwnd != 0) activeTargetHwnd = req.hwnd;
                     imeActive = true;
                     if (req.hasCaret != 0) {
                         lastCaretX = req.caretX;
                         lastCaretY = req.caretY;
-                        lastCaretH = req.caretHeight > 0 ? req.caretHeight : 22;
+                        lastCaretH = std::clamp(req.caretHeight, 12, 64);
                     }
                     act = engine.handleKey(req.vk, req.modifiers, req.isKeyUp != 0, false);
+                    if (act.isQuickInput && !isForegroundQuickInputAuthorized(clientPid, req.hwnd)) {
+                        act.commitText.clear();
+                    }
                     shouldShowCandidates = engine.isComposing() && !engine.allCandidates().empty() &&
                                            (act.showCandidates || (req.isKeyUp != 0 && !act.consumed));
                     openQuickDlg = act.openQuickInputDialog;
@@ -309,6 +370,8 @@ struct HostApp {
                 case liteime::ipc::MsgType::FocusChanged:
                     if (req.focusGained != 0) {
                         activeConnId = connId;
+                        activeClientPid = clientPid;
+                        activeTargetHwnd = req.hwnd;
                         imeActive = true;
                         engine.notifyFocusChanged(true);
                         shouldShowCandidates = false;
@@ -316,6 +379,8 @@ struct HostApp {
                     } else if (activeConnId == 0 || connId == activeConnId) {
                         imeActive = false;
                         activeConnId = 0;
+                        activeClientPid = 0;
+                        activeTargetHwnd = 0;
                         shouldShowCandidates = false;
                         engine.notifyFocusChanged(false);
                         needUi = true;
@@ -332,7 +397,7 @@ struct HostApp {
                     if (req.hasCaret != 0 && (activeConnId == 0 || connId == activeConnId)) {
                         lastCaretX = req.caretX;
                         lastCaretY = req.caretY;
-                        lastCaretH = req.caretHeight > 0 ? req.caretHeight : 22;
+                        lastCaretH = std::clamp(req.caretHeight, 12, 64);
                         needUi = shouldShowCandidates;
                     }
                     act.consumed = true;
@@ -341,6 +406,7 @@ struct HostApp {
                 default:
                     break;
             }
+            composing = engine.isComposing();
             cfgSnap = engine.config();
         }
 
@@ -351,24 +417,7 @@ struct HostApp {
             PostMessageW(msgHwnd, liteime::host::WM_APP_OPEN_QUICK_INPUT, 0, 0);
         }
 
-        resp.consumed = act.consumed ? 1 : 0;
-        resp.isEnglish = cfgSnap.chineseMode ? 0 : 1;
-        resp.isFullWidth = cfgSnap.fullWidth ? 1 : 0;
-        resp.isCnPunct = cfgSnap.chinesePunct ? 1 : 0;
-
-        if (!act.preeditText.empty()) {
-            size_t len = std::min(act.preeditText.size(), liteime::ipc::kMaxPreeditBytes - 1);
-            std::memcpy(resp.preedit, act.preeditText.data(), len);
-            resp.preedit[len] = '\0';
-            resp.preeditLen = static_cast<uint16_t>(len);
-            resp.caretPos = resp.preeditLen;
-        }
-        if (!act.commitText.empty()) {
-            size_t len = std::min(act.commitText.size(), liteime::ipc::kMaxCommitBytes - 1);
-            std::memcpy(resp.commit, act.commitText.data(), len);
-            resp.commit[len] = '\0';
-            resp.commitLen = static_cast<uint16_t>(len);
-        }
+        fillResponseFromAction(act, cfgSnap, composing, resp);
     }
 
     void handleAction(liteime::host::HostAction action) {
@@ -399,6 +448,9 @@ struct HostApp {
 
         bool needReloadExtra = false;
         bool needReloadAll = false;
+        bool cancelledComposition = false;
+        uint32_t notifyPid = 0;
+        uint64_t notifyHwnd = 0;
         liteime::EngineConfig cfgSnap;
         fs::path cfgPath;
 
@@ -411,6 +463,9 @@ struct HostApp {
                     if (!cfg.chineseMode && engine.isComposing()) {
                         engine.resetComposition();
                         shouldShowCandidates = false;
+                        cancelledComposition = true;
+                        notifyPid = activeClientPid;
+                        notifyHwnd = activeTargetHwnd;
                     }
                     break;
                 case liteime::host::HostAction::TogglePunct:
@@ -528,6 +583,12 @@ struct HostApp {
         }
         liteime::engine::UserDict::saveConfig(cfgPath, cfgSnap);
         syncUiFromState();
+        if (cancelledComposition && notifyPid != 0) {
+            liteime::ipc::Response resetResp{};
+            fillResponseFromAction(liteime::engine::KeyActionResult{true, false, false, false, {}, {}, {}},
+                                   cfgSnap, false, resetResp);
+            pushNotifyResponse(notifyPid, notifyHwnd, resetResp);
+        }
     }
 };
 
@@ -580,6 +641,65 @@ LRESULT CALLBACK hostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             if (needSync) {
                 app->syncUiFromState();
+            }
+            return 0;
+        }
+        case liteime::host::WM_APP_CANDIDATE_CLICK: {
+            const int slotIdx = static_cast<int>(wParam);
+            liteime::engine::KeyActionResult act{};
+            liteime::EngineConfig cfgSnap{};
+            bool composing = false;
+            uint32_t notifyPid = 0;
+            uint64_t notifyHwnd = 0;
+            {
+                std::lock_guard<std::mutex> lock(app->stateMutex);
+                if (app->engine.isComposing()) {
+                    act = app->engine.selectCandidateOnPage(slotIdx);
+                    if (act.isQuickInput &&
+                        !HostApp::isForegroundQuickInputAuthorized(app->activeClientPid, app->activeTargetHwnd)) {
+                        act.commitText.clear();
+                    }
+                    composing = app->engine.isComposing();
+                    app->shouldShowCandidates = composing && !app->engine.allCandidates().empty() && act.showCandidates;
+                    cfgSnap = app->engine.config();
+                    notifyPid = app->activeClientPid;
+                    notifyHwnd = app->activeTargetHwnd;
+                }
+            }
+            app->syncUiFromState();
+            if (act.openQuickInputDialog && app->msgHwnd) {
+                PostMessageW(app->msgHwnd, liteime::host::WM_APP_OPEN_QUICK_INPUT, 0, 0);
+            }
+            if (act.consumed && notifyPid != 0) {
+                liteime::ipc::Response resp{};
+                HostApp::fillResponseFromAction(act, cfgSnap, composing, resp);
+                app->pushNotifyResponse(notifyPid, notifyHwnd, resp);
+            }
+            return 0;
+        }
+        case liteime::host::WM_APP_CANDIDATE_PAGE: {
+            const bool isNext = (wParam != 0);
+            liteime::engine::KeyActionResult act{};
+            liteime::EngineConfig cfgSnap{};
+            bool composing = false;
+            uint32_t notifyPid = 0;
+            uint64_t notifyHwnd = 0;
+            {
+                std::lock_guard<std::mutex> lock(app->stateMutex);
+                if (app->engine.isComposing()) {
+                    act = isNext ? app->engine.nextPage() : app->engine.prevPage();
+                    composing = app->engine.isComposing();
+                    app->shouldShowCandidates = composing && !app->engine.allCandidates().empty() && act.showCandidates;
+                    cfgSnap = app->engine.config();
+                    notifyPid = app->activeClientPid;
+                    notifyHwnd = app->activeTargetHwnd;
+                }
+            }
+            app->syncUiFromState();
+            if (act.consumed && notifyPid != 0 && !act.preeditText.empty()) {
+                liteime::ipc::Response resp{};
+                HostApp::fillResponseFromAction(act, cfgSnap, composing, resp);
+                app->pushNotifyResponse(notifyPid, notifyHwnd, resp);
             }
             return 0;
         }
@@ -694,8 +814,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     app.statusWin.create(hInst, app.msgHwnd);
     app.tray.create(app.msgHwnd, hInst);
     app.pipeServer.start(
-        [&app](const liteime::ipc::Request& req, liteime::ipc::Response& resp, uint64_t connId) {
-            app.handleIpc(req, resp, connId);
+        [&app](const liteime::ipc::Request& req, liteime::ipc::Response& resp, uint64_t connId, uint32_t clientPid) {
+            app.handleIpc(req, resp, connId, clientPid);
         },
         [&app](uint64_t connId) {
             app.onClientDisconnected(connId);

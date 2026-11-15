@@ -106,6 +106,7 @@ public:
                               bool isEnglishDict);
 
 private:
+    bool validateAndBindPointers();
     std::string_view strAt(uint32_t off) const;
 
     const uint8_t* base_ = nullptr;

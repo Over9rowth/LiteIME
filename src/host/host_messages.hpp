@@ -11,6 +11,8 @@ constexpr UINT WM_APP_PIN_CANDIDATE = WM_APP + 105;
 constexpr UINT WM_APP_OPEN_QUICK_INPUT = WM_APP + 106;
 constexpr UINT WM_APP_REMOVE_USER_WORD = WM_APP + 107;
 constexpr UINT WM_APP_STATUS_POS_CHANGED = WM_APP + 108;
+constexpr UINT WM_APP_CANDIDATE_CLICK = WM_APP + 109;
+constexpr UINT WM_APP_CANDIDATE_PAGE = WM_APP + 110;
 
 enum class HostAction : WPARAM {
     ToggleChineseEnglish = 1,

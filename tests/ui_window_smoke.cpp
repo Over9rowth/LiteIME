@@ -35,11 +35,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     CHECK((statusRc.right - statusRc.left) > 100);
     CHECK((statusRc.bottom - statusRc.top) > 20);
 
-    // Load real dictionary if available, otherwise fixture
+    // Load real dictionary relative to executable if available, otherwise fixture
     liteime::engine::BinaryDict dict;
-    std::filesystem::path realDict = L"D:/LiteIME/dist/data/liteime.dict";
-    if (std::filesystem::exists(realDict)) {
-        CHECK(dict.loadFile(realDict));
+    wchar_t exePathBuf[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePathBuf, MAX_PATH);
+    std::filesystem::path exeDir = std::filesystem::path(exePathBuf).parent_path();
+    const std::filesystem::path dictCandidates[] = {
+        exeDir / "data" / "liteime.dict",
+        exeDir / "liteime.dict",
+        exeDir.parent_path() / "dist" / "data" / "liteime.dict",
+        exeDir.parent_path().parent_path() / "dist" / "data" / "liteime.dict",
+        std::filesystem::path(L"dist/data/liteime.dict"),
+    };
+    for (const auto& cand : dictCandidates) {
+        if (std::filesystem::exists(cand)) {
+            CHECK(dict.loadFile(cand));
+            break;
+        }
     }
 
     liteime::engine::BilingualEngine eng;
@@ -117,6 +129,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         CHECK(savedRc.right <= mi.rcWork.right);
         CHECK(savedRc.left >= mi.rcWork.left);
         CHECK(savedRc.top == 120 || savedRc.top >= mi.rcWork.top);
+    }
+
+    // Exercise extreme caretHeight values to confirm clamping keeps CandidateWindow inside work area
+    for (int crazyHeight : {-500, 5000}) {
+        vs.caretX = 99999;
+        vs.caretY = 99999;
+        vs.caretHeight = crazyHeight;
+        candWin.update(vs);
+        RECT clampedRc{};
+        CHECK(GetWindowRect(candWin.hwnd(), &clampedRc) != FALSE);
+        HMONITOR mon = MonitorFromWindow(candWin.hwnd(), MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        CHECK(GetMonitorInfoW(mon, &mi) != FALSE);
+        CHECK(clampedRc.top >= mi.rcWork.top);
+        CHECK(clampedRc.left >= mi.rcWork.left);
+        CHECK(clampedRc.right <= mi.rcWork.right);
+        CHECK(clampedRc.bottom <= mi.rcWork.bottom);
     }
 
     std::cout << "StatusPill rect=(" << statusRc.left << "," << statusRc.top << ","

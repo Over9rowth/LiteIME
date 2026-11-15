@@ -290,16 +290,6 @@ void CandidateWindow::update(const CandidateViewState& state) {
     renderAndShow();
 }
 
-void CandidateWindow::triggerVirtualKey(WORD vk) {
-    INPUT inputs[2]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = vk;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = vk;
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
-}
-
 void CandidateWindow::renderAndShow() {
     ensureD2DResources();
     if (!hwnd_ || !dcTarget_ || !dwFactory_ || !textFmt_ || !smallFmt_ || !indexFmt_) return;
@@ -646,14 +636,16 @@ void CandidateWindow::renderAndShow() {
     GetMonitorInfoW(mon, &mi);
 
     int padPx = static_cast<int>(std::round(shadowPad * scale));
+    const int clampedCaretH = std::clamp(state_.caretHeight, 12, 64);
     int posX = state_.caretX - padPx;
     int posY = state_.caretY + static_cast<int>(std::round(6.0f * scale)) - padPx;
 
     if (posX + pxW > mi.rcWork.right) posX = mi.rcWork.right - pxW;
     if (posX < mi.rcWork.left) posX = mi.rcWork.left;
     if (posY + pxH > mi.rcWork.bottom) {
-        posY = state_.caretY - state_.caretHeight - pxH + padPx - static_cast<int>(std::round(6.0f * scale));
+        posY = state_.caretY - clampedCaretH - pxH + padPx - static_cast<int>(std::round(6.0f * scale));
     }
+    if (posY + pxH > mi.rcWork.bottom) posY = mi.rcWork.bottom - pxH;
     if (posY < mi.rcWork.top) posY = mi.rcWork.top;
 
     POINT dstPt{posX, posY};
@@ -720,10 +712,12 @@ LRESULT CandidateWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_MOUSEWHEEL: {
             hidePinPopup();
             const short delta = GET_WHEEL_DELTA_WPARAM(wParam);
-            if (delta > 0) {
-                triggerVirtualKey(VK_OEM_MINUS);
-            } else if (delta < 0) {
-                triggerVirtualKey(VK_OEM_PLUS);
+            if (hostHwnd_) {
+                if (delta > 0) {
+                    PostMessageW(hostHwnd_, WM_APP_CANDIDATE_PAGE, 0, 0);
+                } else if (delta < 0) {
+                    PostMessageW(hostHwnd_, WM_APP_CANDIDATE_PAGE, 1, 0);
+                }
             }
             return 0;
         }
@@ -736,12 +730,13 @@ LRESULT CandidateWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             float y = static_cast<float>(static_cast<short>(HIWORD(lParam))) / scale;
             for (const auto& hr : hitRegions_) {
                 if (x >= hr.rect.left && x <= hr.rect.right && y >= hr.rect.top && y <= hr.rect.bottom) {
+                    if (!hostHwnd_) break;
                     if (hr.actionType == 0 && hr.index >= 0 && hr.index < 9) {
-                        triggerVirtualKey(static_cast<WORD>('1' + hr.index));
+                        PostMessageW(hostHwnd_, WM_APP_CANDIDATE_CLICK, static_cast<WPARAM>(hr.index), 0);
                     } else if (hr.actionType == 1) {
-                        triggerVirtualKey(VK_OEM_MINUS);
+                        PostMessageW(hostHwnd_, WM_APP_CANDIDATE_PAGE, 0, 0);
                     } else if (hr.actionType == 2) {
-                        triggerVirtualKey(VK_OEM_PLUS);
+                        PostMessageW(hostHwnd_, WM_APP_CANDIDATE_PAGE, 1, 0);
                     }
                     break;
                 }

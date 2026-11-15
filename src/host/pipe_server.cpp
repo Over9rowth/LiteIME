@@ -23,20 +23,47 @@ void cancelSyncIoForThread(HANDLE hThread) {
 std::wstring makePipeName() {
     DWORD sessionId = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
-    wchar_t buf[128]{};
-    wsprintfW(buf, L"\\\\.\\pipe\\LiteIME_Host_%lu", sessionId);
-    return buf;
+    return ipc::makePipeName(sessionId);
 }
 
-// Allow standard users, Low Integrity, and AppContainer (Edge/UWP) clients to connect.
-bool buildPermissiveSecurityAttributes(SECURITY_ATTRIBUTES& sa, PSECURITY_DESCRIPTOR& outSd) {
+std::wstring makeNotifyPipeName() {
+    DWORD sessionId = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+    return ipc::makeNotifyPipeName(sessionId);
+}
+
+std::wstring queryCurrentUserSidString() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return {};
+    }
+    DWORD len = 0;
+    GetTokenInformation(hToken, TokenUser, nullptr, 0, &len);
+    std::wstring sidOut;
+    if (len > 0) {
+        std::vector<uint8_t> buf(len);
+        if (GetTokenInformation(hToken, TokenUser, buf.data(), len, &len)) {
+            auto* tu = reinterpret_cast<PTOKEN_USER>(buf.data());
+            LPWSTR sidStr = nullptr;
+            if (ConvertSidToStringSidW(tu->User.Sid, &sidStr) && sidStr) {
+                sidOut = sidStr;
+                LocalFree(sidStr);
+            }
+        }
+    }
+    CloseHandle(hToken);
+    return sidOut;
+}
+
+// Allow only the current user (including elevated split-token) and AppContainer (Edge/UWP) clients at Low Integrity.
+bool buildUserScopedSecurityAttributes(SECURITY_ATTRIBUTES& sa, PSECURITY_DESCRIPTOR& outSd) {
     outSd = nullptr;
-    // SDDL: Allow Everyone (WD) + All App Packages (AC) generic read/write, Low Mandatory Level (LW)
-    const wchar_t* sddl = L"D:(A;;GRGW;;;WD)(A;;GRGW;;;AC)S:(ML;;NW;;;LW)";
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &outSd, nullptr)) {
-        // Fallback without AC for older environments
-        const wchar_t* fallback = L"D:(A;;GRGW;;;WD)S:(ML;;NW;;;LW)";
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(fallback, SDDL_REVISION_1, &outSd, nullptr)) {
+    const std::wstring userSid = queryCurrentUserSidString();
+    const std::wstring principal = userSid.empty() ? std::wstring(L"CO") : userSid;
+    const std::wstring sddl = L"D:(A;;GRGW;;;" + principal + L")(A;;GRGW;;;AC)S:(ML;;NW;;;LW)";
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &outSd, nullptr)) {
+        const std::wstring fallback = L"D:(A;;GRGW;;;" + principal + L")S:(ML;;NW;;;LW)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(fallback.c_str(), SDDL_REVISION_1, &outSd, nullptr)) {
             return false;
         }
     }
@@ -56,13 +83,22 @@ bool PipeServer::start(RequestHandler onRequest, DisconnectHandler onDisconnect)
     if (running_.load()) return true;
     onRequest_ = std::move(onRequest);
     onDisconnect_ = std::move(onDisconnect);
+    if (!notifyStopEvent_) {
+        notifyStopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    } else {
+        ResetEvent(notifyStopEvent_);
+    }
     running_.store(true);
     acceptThread_ = std::thread(&PipeServer::acceptLoop, this);
+    notifyAcceptThread_ = std::thread(&PipeServer::notifyAcceptLoop, this);
     return true;
 }
 
 void PipeServer::stop() {
     if (!running_.exchange(false)) return;
+    if (notifyStopEvent_) {
+        SetEvent(notifyStopEvent_);
+    }
     // Wake blocking ConnectNamedPipe by briefly connecting as a dummy client
     std::wstring name = makePipeName();
     HANDLE dummy = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -71,6 +107,22 @@ void PipeServer::stop() {
     }
     if (acceptThread_.joinable()) {
         acceptThread_.join();
+    }
+    if (notifyAcceptThread_.joinable()) {
+        notifyAcceptThread_.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(notifyMutex_);
+        for (const auto& nc : notifyClients_) {
+            if (nc.pipe && nc.pipe != INVALID_HANDLE_VALUE) {
+                CloseHandle(nc.pipe);
+            }
+        }
+        notifyClients_.clear();
+    }
+    if (notifyStopEvent_) {
+        CloseHandle(notifyStopEvent_);
+        notifyStopEvent_ = nullptr;
     }
 
     // Wake every detached client thread blocked in ReadFile/WriteFile and wait until all exit cleanly.
@@ -107,7 +159,7 @@ void PipeServer::acceptLoop() {
     const std::wstring name = makePipeName();
     SECURITY_ATTRIBUTES sa{};
     PSECURITY_DESCRIPTOR sd = nullptr;
-    bool hasSa = buildPermissiveSecurityAttributes(sa, sd);
+    bool hasSa = buildUserScopedSecurityAttributes(sa, sd);
 
     while (running_.load()) {
         HANDLE hPipe = CreateNamedPipeW(
@@ -173,6 +225,9 @@ void PipeServer::handleClient(HANDLE hPipe, uint64_t connId) {
         }
     } clientGuard{this, hPipe, hSelfThread};
 
+    ULONG clientPid = 0;
+    GetNamedPipeClientProcessId(hPipe, &clientPid);
+
     while (running_.load(std::memory_order_acquire)) {
         ipc::Request req{};
         DWORD bytesRead = 0;
@@ -184,7 +239,7 @@ void PipeServer::handleClient(HANDLE hPipe, uint64_t connId) {
         ipc::Response resp{};
         if (req.magic == ipc::kProtocolMagic && req.version == ipc::kProtocolVersion) {
             if (running_.load(std::memory_order_acquire) && onRequest_) {
-                onRequest_(req, resp, connId);
+                onRequest_(req, resp, connId, static_cast<uint32_t>(clientPid));
             }
         }
 
@@ -199,6 +254,148 @@ void PipeServer::handleClient(HANDLE hPipe, uint64_t connId) {
     if (running_.load(std::memory_order_acquire) && onDisconnect_) {
         onDisconnect_(connId);
     }
+}
+
+void PipeServer::notifyAcceptLoop() {
+    const std::wstring name = makeNotifyPipeName();
+    SECURITY_ATTRIBUTES sa{};
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    bool hasSa = buildUserScopedSecurityAttributes(sa, sd);
+
+    HANDLE connectEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    while (running_.load(std::memory_order_acquire)) {
+        HANDLE hPipe = CreateNamedPipeW(
+            name.c_str(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            sizeof(ipc::NotifyPacket) * 4,
+            sizeof(ipc::NotifyHello) * 4,
+            0,
+            hasSa ? &sa : nullptr);
+        if (hPipe == INVALID_HANDLE_VALUE) {
+            Sleep(50);
+            continue;
+        }
+
+        ResetEvent(connectEvt);
+        OVERLAPPED ov{};
+        ov.hEvent = connectEvt;
+        BOOL connected = ConnectNamedPipe(hPipe, &ov);
+        if (!connected) {
+            DWORD err = GetLastError();
+            if (err == ERROR_IO_PENDING) {
+                HANDLE waits[2] = {notifyStopEvent_, connectEvt};
+                DWORD wr = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+                if (wr != WAIT_OBJECT_0 + 1) {
+                    CancelIoEx(hPipe, &ov);
+                    CloseHandle(hPipe);
+                    break;
+                }
+                DWORD dummy = 0;
+                connected = GetOverlappedResult(hPipe, &ov, &dummy, FALSE);
+            } else if (err == ERROR_PIPE_CONNECTED) {
+                connected = TRUE;
+            }
+        }
+
+        if (!running_.load(std::memory_order_acquire) || !connected) {
+            CloseHandle(hPipe);
+            if (!running_.load(std::memory_order_acquire)) break;
+            continue;
+        }
+
+        // Briefly read NotifyHello with a bounded timeout so an unresponsive peer cannot stall acceptLoop
+        ResetEvent(connectEvt);
+        OVERLAPPED rov{};
+        rov.hEvent = connectEvt;
+        ipc::NotifyHello hello{};
+        DWORD br = 0;
+        BOOL rok = ReadFile(hPipe, &hello, sizeof(hello), &br, &rov);
+        if (!rok && GetLastError() == ERROR_IO_PENDING) {
+            DWORD wr = WaitForSingleObject(connectEvt, 150);
+            if (wr == WAIT_OBJECT_0) {
+                rok = GetOverlappedResult(hPipe, &rov, &br, FALSE);
+            } else {
+                CancelIoEx(hPipe, &rov);
+                DWORD dummy = 0;
+                GetOverlappedResult(hPipe, &rov, &dummy, TRUE);
+            }
+        }
+
+        ULONG actualPid = 0;
+        if (!rok || br < sizeof(ipc::NotifyHello) || hello.magic != ipc::kProtocolMagic ||
+            !GetNamedPipeClientProcessId(hPipe, &actualPid) || actualPid == 0) {
+            CloseHandle(hPipe);
+            continue;
+        }
+
+        std::lock_guard<std::mutex> lock(notifyMutex_);
+        // Prune dead handles before adding the new one
+        notifyClients_.erase(
+            std::remove_if(notifyClients_.begin(), notifyClients_.end(), [](const NotifyClient& nc) {
+                DWORD avail = 0;
+                if (!PeekNamedPipe(nc.pipe, nullptr, 0, nullptr, &avail, nullptr)) {
+                    DWORD err = GetLastError();
+                    if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED || err == ERROR_INVALID_HANDLE) {
+                        CloseHandle(nc.pipe);
+                        return true;
+                    }
+                }
+                return false;
+            }),
+            notifyClients_.end());
+        notifyClients_.push_back(NotifyClient{hPipe, static_cast<uint32_t>(actualPid), hello.hwnd});
+    }
+
+    if (connectEvt) CloseHandle(connectEvt);
+    if (sd) LocalFree(sd);
+}
+
+bool PipeServer::sendNotify(uint32_t targetPid, const ipc::NotifyPacket& pkt) {
+    if (targetPid == 0 || !running_.load(std::memory_order_acquire)) return false;
+
+    std::lock_guard<std::mutex> lock(notifyMutex_);
+    bool sentAny = false;
+    HANDLE writeEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    auto it = notifyClients_.begin();
+    while (it != notifyClients_.end()) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(it->pipe, nullptr, 0, nullptr, &avail, nullptr)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED || err == ERROR_INVALID_HANDLE) {
+                CloseHandle(it->pipe);
+                it = notifyClients_.erase(it);
+                continue;
+            }
+        }
+        if (it->pid == targetPid) {
+            ResetEvent(writeEvt);
+            OVERLAPPED ov{};
+            ov.hEvent = writeEvt;
+            DWORD bw = 0;
+            BOOL ok = WriteFile(it->pipe, &pkt, sizeof(pkt), &bw, &ov);
+            if (!ok && GetLastError() == ERROR_IO_PENDING) {
+                if (writeEvt && WaitForSingleObject(writeEvt, 50) == WAIT_OBJECT_0) {
+                    ok = GetOverlappedResult(it->pipe, &ov, &bw, FALSE);
+                } else {
+                    CancelIoEx(it->pipe, &ov);
+                    DWORD dummy = 0;
+                    GetOverlappedResult(it->pipe, &ov, &dummy, TRUE);
+                }
+            }
+            if (ok && bw == sizeof(pkt)) {
+                sentAny = true;
+            } else {
+                CloseHandle(it->pipe);
+                it = notifyClients_.erase(it);
+                continue;
+            }
+        }
+        ++it;
+    }
+    if (writeEvt) CloseHandle(writeEvt);
+    return sentAny;
 }
 
 } // namespace liteime::host

@@ -2,6 +2,7 @@
 #include "engine/binary_dict.hpp"
 #include "engine/pinyin_table.hpp"
 #include "common/ipc_protocol.hpp"
+#include "common/utf.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -1154,6 +1155,130 @@ int wmain() {
         typeWord(eng, "ju");
         CHECK(!eng.currentPageItems().empty() && eng.currentPageItems()[0].text == "局");
         eng.handleKey(0x1B, 0, false);
+    }
+
+    // Regression tests for Moduan 9-bug audit & Tier-1 optimizations
+    {
+        // Bug 1: All 5 missing EngineConfig fields persist & reload across config.ini
+        EngineConfig cfgOut;
+        cfgOut.showStatusBar = false;
+        cfgOut.fullWidth = true;
+        cfgOut.smartDecimal = false;
+        cfgOut.autoUrlEnglish = false;
+        cfgOut.shiftTapToggle = false;
+        auto cfgFile = tmpDir / "cfg_roundtrip.ini";
+        CHECK(UserDict::saveConfig(cfgFile, cfgOut));
+        EngineConfig cfgIn;
+        CHECK(UserDict::loadConfig(cfgFile, cfgIn));
+        CHECK(cfgIn.showStatusBar == false);
+        CHECK(cfgIn.fullWidth == true);
+        CHECK(cfgIn.smartDecimal == false);
+        CHECK(cfgIn.autoUrlEnglish == false);
+        CHECK(cfgIn.shiftTapToggle == false);
+
+        // Bug 5: copyUtf8Bounded never splits multi-byte UTF-8 characters
+        const std::string utf8Text = "你好世界"; // 4 x 3 bytes = 12 bytes
+        char smallBuf[8]{};
+        size_t copied = copyUtf8Bounded(utf8Text, smallBuf, sizeof(smallBuf));
+        CHECK(copied == 6); // 2 complete 3-byte chars fit in 7 usable bytes
+        CHECK(std::string(smallBuf) == "你好");
+
+        // Bug 6: BinaryDict::loadFromMemory validates offsets and rejects truncated/corrupted tables
+        std::vector<uint8_t> badBuf(sizeof(DictHeader), 0);
+        DictHeader hdr{};
+        hdr.magic = 0x4C494D31;
+        hdr.version = 1;
+        hdr.phraseCount = 999999;
+        hdr.phraseOffset = sizeof(DictHeader);
+        std::memcpy(badBuf.data(), &hdr, sizeof(hdr));
+        BinaryDict corruptDict;
+        CHECK(!corruptDict.loadFromMemory(badBuf));
+
+        // Bug 6b: BinaryDict::lookupJianpin skips corrupted out-of-bounds phraseIdx safely
+        auto validFile = tmpDir / "oob_jp_test.dict";
+        CHECK(BinaryDict::compileToFile(validFile, {{"你好", "ni hao", 1000, 2}}, {}));
+        std::ifstream ifs(validFile, std::ios::binary | std::ios::ate);
+        auto fsz = ifs.tellg();
+        ifs.seekg(0);
+        std::vector<uint8_t> rawDictBytes(static_cast<size_t>(fsz));
+        CHECK(static_cast<bool>(ifs.read(reinterpret_cast<char*>(rawDictBytes.data()), fsz)));
+        auto* rawHdr = reinterpret_cast<DictHeader*>(rawDictBytes.data());
+        if (rawHdr->jianpinCount > 0) {
+            auto* jpEntries = reinterpret_cast<JianpinEntry*>(rawDictBytes.data() + rawHdr->jianpinOffset);
+            jpEntries[0].phraseIdx = 99999;
+        }
+        BinaryDict oobDict;
+        CHECK(oobDict.loadFromMemory(rawDictBytes));
+        CHECK(oobDict.lookupJianpin("nh", 8).empty());
+
+        // Bug 7: lookupPinyinPrefix scans beyond 256 lexicon-prefix entries (e.g. >260 "wo sha..." before "wo shi")
+        std::vector<RawPhraseRecord> bigPrefixPhrases;
+        for (int i = 0; i < 300; ++i) {
+            bigPrefixPhrases.push_back({"占位", "wo sha", 100, 2});
+        }
+        bigPrefixPhrases.push_back({"我是", "wo shi", 900000, 2});
+        auto bigPrefixFile = tmpDir / "big_prefix_test.dict";
+        CHECK(BinaryDict::compileToFile(bigPrefixFile, bigPrefixPhrases, {}));
+        BinaryDict bigPrefixDict;
+        CHECK(bigPrefixDict.loadFile(bigPrefixFile));
+        auto pHits = bigPrefixDict.lookupPinyinPrefix("wo sh", 10);
+        CHECK(!pHits.empty() && pHits[0].word == "我是");
+
+        // Bug 8: quick_input.tsv escapes \, \t, \r, \n cleanly & atomic write leaves no .tmp file
+        UserDict qiUd;
+        auto qiDictPath = tmpDir / "qi_dir" / "user_dict.tsv";
+        qiUd.load(qiDictPath);
+        qiUd.setQuickInputs({{"multi\\line", "line1\nline2\tcol2\r\nend"}});
+        CHECK(qiUd.saveQuickInputs());
+        CHECK(!std::filesystem::exists(qiUd.quickInputsPath().wstring() + L".tmp"));
+        UserDict qiReloaded;
+        qiReloaded.load(qiDictPath);
+        CHECK(qiReloaded.quickInputs().size() == 1);
+        CHECK(qiReloaded.quickInputs()[0].label == "multi\\line");
+        CHECK(qiReloaded.quickInputs()[0].value == "line1\nline2\tcol2\r\nend");
+
+        // Bug 9: Numpad digits + '.' smartDecimal, plus fullWidth ASCII conversion
+        BilingualEngine numEng;
+        numEng.setDictionary(&bigPrefixDict);
+        auto num3 = numEng.handleKey(0x63, 0, false); // VK_NUMPAD3
+        CHECK(!num3.consumed);
+        auto dotRes = numEng.handleKey(0xBE, 0, false); // VK_OEM_PERIOD -> half-width '.'
+        CHECK(dotRes.consumed && dotRes.commitText == ".");
+
+        BilingualEngine fwEng;
+        fwEng.setDictionary(&bigPrefixDict);
+        fwEng.config().chineseMode = false;
+        fwEng.config().fullWidth = true;
+        auto fwA = fwEng.handleKey('A', 0, false);
+        CHECK(fwA.consumed && fwA.commitText == "\xEF\xBD\x81"); // 'ａ' (U+FF41)
+
+        // Tier-1 Dir 2 & Dir 4: 2-char [EN] "we" demotion & "fangan" dual-path frequency fairness
+        std::vector<RawPhraseRecord> tier1Phrases = {
+            {"为", "wei", 50000, 1},
+            {"反感", "fan gan", 3000, 2},
+            {"方案", "fang an", 50000, 2},
+        };
+        std::vector<RawEnglishRecord> tier1En = {
+            {"we", "we", 50000},
+            {"ok", "ok", 50000},
+        };
+        auto t1File = tmpDir / "tier1_test.dict";
+        CHECK(BinaryDict::compileToFile(t1File, tier1Phrases, tier1En));
+        BinaryDict t1Dict;
+        CHECK(t1Dict.loadFile(t1File));
+        BilingualEngine t1Eng;
+        t1Eng.setDictionary(&t1Dict);
+
+        typeWord(t1Eng, "we");
+        auto weItems = t1Eng.currentPageItems();
+        CHECK(!weItems.empty() && weItems[0].text == "为" && weItems[0].kind != CandidateKind::EnglishWord);
+        t1Eng.handleKey(0x1B, 0, false);
+
+        typeWord(t1Eng, "fangan");
+        auto fgItems = t1Eng.currentPageItems();
+        CHECK(!fgItems.empty() && fgItems[0].text == "方案");
+        CHECK(t1Eng.formattedHeader() == "fang'an");
+        t1Eng.handleKey(0x1B, 0, false);
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

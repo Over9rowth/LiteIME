@@ -35,6 +35,76 @@ constexpr uint32_t kVkOem4    = 0xDB; // [{
 constexpr uint32_t kVkOem5    = 0xDC; // \|
 constexpr uint32_t kVkOem6    = 0xDD; // ]}
 constexpr uint32_t kVkOem7    = 0xDE; // '"
+constexpr uint32_t kVkNumpad0 = 0x60;
+constexpr uint32_t kVkNumpad9 = 0x69;
+constexpr uint32_t kVkMultiply= 0x6A;
+constexpr uint32_t kVkAdd     = 0x6B;
+constexpr uint32_t kVkSubtract= 0x6D;
+constexpr uint32_t kVkDecimal = 0x6E;
+constexpr uint32_t kVkDivide  = 0x6F;
+
+char digitFromVk(uint32_t vk, bool shift) {
+    if (!shift && vk >= '0' && vk <= '9') {
+        return static_cast<char>(vk);
+    }
+    if (vk >= kVkNumpad0 && vk <= kVkNumpad9) {
+        return static_cast<char>('0' + (vk - kVkNumpad0));
+    }
+    return '\0';
+}
+
+char mapAsciiPrintableVk(uint32_t vk, bool shift, bool caps) {
+    if (vk == kVkSpace) return ' ';
+    if (vk >= 'A' && vk <= 'Z') {
+        bool upper = (shift != caps);
+        return static_cast<char>(upper ? vk : (vk - 'A' + 'a'));
+    }
+    if (vk >= '0' && vk <= '9') {
+        static constexpr char kShiftDigits[] = ")!@#$%^&*(";
+        return shift ? kShiftDigits[vk - '0'] : static_cast<char>(vk);
+    }
+    if (vk >= kVkNumpad0 && vk <= kVkNumpad9) {
+        return static_cast<char>('0' + (vk - kVkNumpad0));
+    }
+    switch (vk) {
+        case kVkMultiply: return '*';
+        case kVkAdd:      return '+';
+        case kVkSubtract: return '-';
+        case kVkDecimal:  return '.';
+        case kVkDivide:   return '/';
+        case kVkOem1:     return shift ? ':' : ';';
+        case kVkOemPlus:  return shift ? '+' : '=';
+        case kVkOemComma: return shift ? '<' : ',';
+        case kVkOemMinus: return shift ? '_' : '-';
+        case kVkOemPeriod:return shift ? '>' : '.';
+        case kVkOem2:     return shift ? '?' : '/';
+        case kVkOem3:     return shift ? '~' : '`';
+        case kVkOem4:     return shift ? '{' : '[';
+        case kVkOem5:     return shift ? '|' : '\\';
+        case kVkOem6:     return shift ? '}' : ']';
+        case kVkOem7:     return shift ? '"' : '\'';
+        default:          return '\0';
+    }
+}
+
+std::string toFullWidthUtf8(std::string_view utf8) {
+    std::string out;
+    out.reserve(utf8.size());
+    for (size_t i = 0; i < utf8.size(); ++i) {
+        unsigned char b = static_cast<unsigned char>(utf8[i]);
+        if (b == ' ') {
+            out += "\xE3\x80\x80"; // U+3000 IDEOGRAPHIC SPACE
+        } else if (b >= 0x21 && b <= 0x7E) {
+            uint32_t cp = static_cast<uint32_t>(b) + 0xFEE0u;
+            out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else {
+            out.push_back(utf8[i]);
+        }
+    }
+    return out;
+}
 
 bool isShiftVk(uint32_t vk) {
     return vk == kVkShift || vk == kVkLShift || vk == kVkRShift;
@@ -287,10 +357,11 @@ void BilingualEngine::undoLastPrefixStep() {
     rawBuffer_ = step.rawConsumed;
 }
 
-KeyActionResult BilingualEngine::finalizeCommit(const std::string& text, bool resetModeFlags) {
+KeyActionResult BilingualEngine::finalizeCommit(const std::string& text, bool resetModeFlags, bool isQuickInput) {
     KeyActionResult res;
     res.consumed = true;
-    res.commitText = text;
+    res.isQuickInput = isQuickInput;
+    res.commitText = (config_.fullWidth && !isQuickInput) ? toFullWidthUtf8(text) : text;
     lastCommittedQuoteKind_ = 0;
     if (!text.empty()) {
         char last = text.back();
@@ -309,6 +380,7 @@ KeyActionResult BilingualEngine::commitCandidateAtGlobalIndex(size_t idx) {
     }
 
     const CandidateItem chosen = candidates_[idx];
+    const bool isQuick = (chosen.kind == CandidateKind::QuickInput);
 
     if (chosen.kind == CandidateKind::QuickInputSetup) {
         resetComposition();
@@ -333,11 +405,11 @@ KeyActionResult BilingualEngine::commitCandidateAtGlobalIndex(size_t idx) {
                 committedPrefixPinyin_ += chosen.matchedKey;
                 flushPendingLearnedPhrase();
                 std::string full = committedPrefixWords_;
-                return finalizeCommit(full);
+                return finalizeCommit(full, true, isQuick);
             }
         }
         std::string full = committedPrefixWords_ + chosenCommit;
-        return finalizeCommit(full);
+        return finalizeCommit(full, true, isQuick);
     }
 
     // Partial selection (e.g. selected "我想" out of "woxiangkan"): keep remaining rawBuffer_!
@@ -467,11 +539,22 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         return res;
     }
 
-    // 2. English mode OR Caps Lock active when idle -> direct pass-through (uppercase letters & English punctuation)
+    // 2. English mode OR Caps Lock active when idle -> convert to full-width if enabled, else pass-through
     if (!config_.chineseMode || (caps && !isComposing())) {
+        if (config_.fullWidth) {
+            char ascii = mapAsciiPrintableVk(vk, shift, caps);
+            if (ascii != '\0') {
+                if (testOnly) {
+                    res.consumed = true;
+                    return res;
+                }
+                std::string s(1, ascii);
+                return finalizeCommit(s, false);
+            }
+        }
         if (!testOnly) {
-            if (!shift && vk >= '0' && vk <= '9') lastCommittedChar_ = static_cast<char>(vk);
-            else lastCommittedChar_ = '\0';
+            char d = digitFromVk(vk, shift);
+            lastCommittedChar_ = (d != '\0') ? d : '\0';
             lastCommittedQuoteKind_ = 0;
         }
         return res;
@@ -675,10 +758,16 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         return buildComposeResult();
     }
 
-    // Track digits so `3.14` outputs half-width '.'
-    if (!shift && vk >= '0' && vk <= '9') {
+    // Track digits (including numpad 0..9) so `3.14` outputs half-width '.'
+    char idleDigit = digitFromVk(vk, shift);
+    if (idleDigit != '\0') {
+        if (config_.fullWidth) {
+            if (testOnly) { res.consumed = true; return res; }
+            std::string s(1, idleDigit);
+            return finalizeCommit(s, false);
+        }
         if (!testOnly) {
-            lastCommittedChar_ = static_cast<char>(vk);
+            lastCommittedChar_ = idleDigit;
             lastCommittedQuoteKind_ = 0;
         }
         return res;
@@ -696,6 +785,15 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             return out;
         }
         return finalizeCommit(punct, false);
+    }
+
+    if (config_.fullWidth) {
+        char ascii = mapAsciiPrintableVk(vk, shift, caps);
+        if (ascii != '\0') {
+            if (testOnly) { res.consumed = true; return res; }
+            std::string s(1, ascii);
+            return finalizeCommit(s, false);
+        }
     }
 
     if (!testOnly) {

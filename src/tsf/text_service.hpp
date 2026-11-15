@@ -4,7 +4,9 @@
 #include "tsf/pipe_client.hpp"
 #include "common/ipc_protocol.hpp"
 
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace liteime::tsf {
 
@@ -63,10 +65,17 @@ private:
     void uninitThreadMgrSink();
     bool initKeyEventSink();
     void uninitKeyEventSink();
+    void initNotifyWindow();
+    void uninitNotifyWindow();
+    void enqueueNotify(const ipc::NotifyPacket& pkt);
+    void drainNotifyQueue();
+    static LRESULT CALLBACK notifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     void updateTextEditSink(ITfDocumentMgr* pdim);
     void initDisplayAttributeAtom();
 
     void fillCaretPos(ITfContext* pic, ipc::Request& req);
+    void applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
+                            bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal);
     uint32_t currentModifiers() const;
     HRESULT handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM lParam, bool isKeyUp, bool testOnly, BOOL* pfEaten);
 
@@ -80,6 +89,11 @@ private:
     TfGuidAtom displayAttrAtom_ = TF_INVALID_GUIDATOM;
     bool isComposing_ = false;
     bool ignoreNextEndEdit_ = false;
+    uint64_t activeHwnd_ = 0;
+
+    HWND notifyHwnd_ = nullptr;
+    std::mutex notifyMutex_;
+    std::vector<ipc::NotifyPacket> pendingNotifies_;
 
     PipeClient pipe_;
 };

@@ -16,11 +16,11 @@ VERSION = 1
 
 # Match ipc::Request (packed, 44 bytes)
 REQ_FMT = "<IHHIIIBBBBiiiQ"
-# Match ipc::Response (packed, 784 bytes: I H B B B B H H H 256s 512s)
-RESP_FMT = "<IHBBBBHHH256s512s"
+# Match ipc::Response (packed, 4626 bytes: I H B B B B B B H H H 512s 4096s)
+RESP_FMT = "<IHBBBBBBHHH512s4096s"
 
 assert struct.calcsize(REQ_FMT) == 44
-assert struct.calcsize(RESP_FMT) == 784
+assert struct.calcsize(RESP_FMT) == 4626
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, wt.LPVOID, wt.DWORD, wt.DWORD, wt.HANDLE]
@@ -64,13 +64,14 @@ def send_ipc(pipe, msg_type: int, vk: int = 0, mods: int = 0, key_up: int = 0, f
     )
     if not ok:
         raise ctypes.WinError(ctypes.get_last_error())
-    magic, ver, consumed, is_en, is_fw, is_cnp, pre_len, com_len, caret, pre_b, com_b = struct.unpack(
+    magic, ver, consumed, is_en, is_fw, is_cnp, is_comp, _res, pre_len, com_len, caret, pre_b, com_b = struct.unpack(
         RESP_FMT, resp_buf.raw
     )
     assert magic == MAGIC and ver == VERSION
     return {
         "consumed": bool(consumed),
         "is_en": bool(is_en),
+        "is_composing": bool(is_comp),
         "preedit": pre_b[:pre_len].decode("utf-8"),
         "commit": com_b[:com_len].decode("utf-8"),
     }
@@ -79,9 +80,12 @@ def send_ipc(pipe, msg_type: int, vk: int = 0, mods: int = 0, key_up: int = 0, f
 def main() -> int:
     user_dict = pathlib.Path(os.environ.get("APPDATA", "")) / "LiteIME" / "user_dict.tsv"
     saved_user_dict = user_dict.read_bytes() if user_dict.exists() else None
+    quick_tsv = user_dict.parent / "quick_input.tsv"
+    saved_quick_tsv = quick_tsv.read_bytes() if quick_tsv.exists() else None
     config_ini = user_dict.parent / "config.ini"
     saved_config_ini = config_ini.read_bytes() if config_ini.exists() else None
     config_ini.parent.mkdir(parents=True, exist_ok=True)
+    quick_tsv.write_text("# LiteIME Smoke Quick Input\nsecret\tSMOKE_SECRET_991\n", encoding="utf-8")
     config_ini.write_text(
         "# LiteIME Smoke Test Config\n"
         "pageSize=5\n"
@@ -264,12 +268,20 @@ def main() -> int:
         assert wait_visible(cand_hwnd, False), "CandidateWindow must hide when switching IME!"
         assert wait_visible(status_hwnd, False), "StatusPill must hide when switching IME!"
 
-        # 10. Modal UI non-blocking & multi-client IPC concurrency regression test:
-        # Open modal QuickInput privacy MessageBoxW via "vvv" -> Space, then slam IPC from 4 worker threads.
+        # 9b. QuickInput plaintext theft guard + is_composing flag verification
         send_ipc(pipe, 3, focus=1)
         for ch in "VVV":
+            r_v = send_ipc(pipe, 2, ord(ch), 0, 0)
+            assert r_v["consumed"] and r_v["is_composing"]
+        r_qi_theft = send_ipc(pipe, 2, ord("1"), 0, 0)  # req.hwnd == 0 -> must refuse QuickInput plaintext!
+        assert r_qi_theft["commit"] == "", f"Non-foreground pipe client stole QuickInput plaintext: {r_qi_theft!r}"
+        assert not r_qi_theft["is_composing"]
+
+        # 10. Modal UI non-blocking & multi-client IPC concurrency regression test:
+        # Open QuickInput manager / modal warning via "vvv" -> '2' (QuickInputSetup slot), then slam IPC from 4 worker threads.
+        for ch in "VVV":
             assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
-        send_ipc(pipe, 2, 0x20, 0, 0)  # opens modal warning MessageBoxW on GUI thread!
+        send_ipc(pipe, 2, ord("2"), 0, 0)  # opens modal warning/manager dialog on GUI thread!
         time.sleep(0.08)
 
         errors = []
@@ -338,6 +350,11 @@ def main() -> int:
             config_ini.write_bytes(saved_config_ini)
         elif config_ini.exists():
             config_ini.unlink()
+        if saved_quick_tsv is not None:
+            quick_tsv.parent.mkdir(parents=True, exist_ok=True)
+            quick_tsv.write_bytes(saved_quick_tsv)
+        elif quick_tsv.exists():
+            quick_tsv.unlink()
 
 
 if __name__ == "__main__":

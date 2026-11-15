@@ -40,6 +40,7 @@ struct KeyActionResult {
     bool consumed = false;
     bool showCandidates = false;
     bool openQuickInputDialog = false;
+    bool isQuickInput = false;
     std::string preeditText;    // inline text shown in target app
     std::string headerBuffer;   // pinyin/code shown at top of candidate window
     std::string commitText;
@@ -102,7 +103,7 @@ private:
     std::string highlightedCandidateText() const;
     KeyActionResult buildComposeResult() const;
     KeyActionResult commitCandidateAtGlobalIndex(size_t idx);
-    KeyActionResult finalizeCommit(const std::string& text, bool resetModeFlags = true);
+    KeyActionResult finalizeCommit(const std::string& text, bool resetModeFlags = true, bool isQuickInput = false);
     void flushPendingLearnedPhrase();
     void undoLastPrefixStep();
 

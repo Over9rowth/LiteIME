@@ -150,19 +150,15 @@ void BilingualEngine::rebuildCandidates() {
     bool hasFuzzyMatches = false;
 
     if (!paths.empty() && hasAnyDict()) {
-        const SegmentPath& bestPath = paths[0];
-        const bool hasUpper = std::any_of(rawBuffer_.begin(), rawBuffer_.end(),
-                                          [](unsigned char c) { return c >= 'A' && c <= 'Z'; });
-        if (!hasUpper) {
+        auto buildHeaderForPath = [this](const SegmentPath& path) {
             std::string hdr;
-            for (size_t i = 0; i < bestPath.tokens.size(); ++i) {
-                const auto& tok = bestPath.tokens[i];
+            for (size_t i = 0; i < path.tokens.size(); ++i) {
+                const auto& tok = path.tokens[i];
                 if (tok.start + tok.length <= rawBuffer_.size()) {
                     if (i > 0) hdr.push_back('\'');
                     hdr.append(rawBuffer_, tok.start, tok.length);
                 } else {
-                    hdr.clear();
-                    break;
+                    return std::string{};
                 }
             }
             auto stripApos = [](std::string_view s) {
@@ -174,6 +170,16 @@ void BilingualEngine::rebuildCandidates() {
                 return out;
             };
             if (!hdr.empty() && stripApos(hdr) == stripApos(rawBuffer_)) {
+                return hdr;
+            }
+            return std::string{};
+        };
+        const SegmentPath& bestPath = paths[0];
+        const bool hasUpper = std::any_of(rawBuffer_.begin(), rawBuffer_.end(),
+                                          [](unsigned char c) { return c >= 'A' && c <= 'Z'; });
+        if (!hasUpper) {
+            std::string hdr = buildHeaderForPath(bestPath);
+            if (!hdr.empty()) {
                 segmentedHeader_ = std::move(hdr);
             }
         }
@@ -181,6 +187,10 @@ void BilingualEngine::rebuildCandidates() {
         const std::string fullKey = bestPath.joinedKey();
 
         // 3a & 3b. Exact full-input Chinese phrases across top segmentation paths (groupRank = 92)
+        // When alternative paths have no partial tokens and the same syllable count as paths[0]
+        // (e.g. fangan: "fan'gan" vs "fang'an"), use a light tie-break penalty so corpus frequency decides.
+        double bestExactPhraseScore = -1e18;
+        size_t bestExactPhrasePathIdx = 0;
         for (size_t pIdx = 0; pIdx < paths.size(); ++pIdx) {
             const auto& path = paths[pIdx];
             if (std::any_of(path.tokens.begin(), path.tokens.end(), [](const SyllableToken& t) {
@@ -188,13 +198,21 @@ void BilingualEngine::rebuildCandidates() {
                 })) {
                 continue;
             }
+            const double pathPenalty = (pIdx > 0 && path.tokens.size() == tokCount)
+                ? static_cast<double>(pIdx) * 2.5
+                : static_cast<double>(pIdx) * 15.0;
             const std::string key = path.joinedKey();
             const size_t exactLimit = (path.tokens.size() == 1) ? 120 : 24;
             auto exactHits = queryExactAll(key, exactLimit);
             for (const auto& h : exactHits) {
                 hasFullExactChinese = true;
-                double sc = 360.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0 - static_cast<double>(pIdx) * 15.0;
+                double sc = 360.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0 - pathPenalty;
                 uint32_t tier = userDict_.getTier(key, h.word);
+                double effectiveScore = sc + static_cast<double>(tier) * 1000.0;
+                if (effectiveScore > bestExactPhraseScore) {
+                    bestExactPhraseScore = effectiveScore;
+                    bestExactPhrasePathIdx = pIdx;
+                }
                 addScored(h.word, "", key, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 92, tier);
             }
             // Also include any user-learned / promoted word for this exact full key not already in top exactHits
@@ -202,9 +220,20 @@ void BilingualEngine::rebuildCandidates() {
                 uint32_t tier = UserDict::tierForCount(u.count);
                 if (tier >= 1 || u.word.size() > 3) {
                     hasFullExactChinese = true;
-                    addScored(u.word, "", key, rawBuffer_.size(), 330.0 - static_cast<double>(pIdx) * 15.0,
-                              CandidateKind::ChinesePhrase, 92, tier);
+                    double sc = 330.0 - pathPenalty;
+                    double effectiveScore = sc + static_cast<double>(tier) * 1000.0;
+                    if (effectiveScore > bestExactPhraseScore) {
+                        bestExactPhraseScore = effectiveScore;
+                        bestExactPhrasePathIdx = pIdx;
+                    }
+                    addScored(u.word, "", key, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 92, tier);
                 }
+            }
+        }
+        if (!hasUpper && bestExactPhrasePathIdx > 0 && bestExactPhrasePathIdx < paths.size()) {
+            std::string altHdr = buildHeaderForPath(paths[bestExactPhrasePathIdx]);
+            if (!altHdr.empty()) {
+                segmentedHeader_ = std::move(altHdr);
             }
         }
 
@@ -515,6 +544,17 @@ void BilingualEngine::rebuildCandidates() {
 
     // 4. Bilingual mixed English candidates (surface common/custom English words visibly on Page 1)
     std::string page1SurfaceEnWord;
+    size_t page1SurfaceTargetIdx = 2;
+    auto isTwoLetterWhitelist = [](std::string_view s) {
+        static constexpr std::string_view kList[] = {
+            "ok", "ai", "ui", "ux", "ip", "id", "os", "pc",
+            "pr", "qa", "vs", "io", "db", "js", "ts", "go"
+        };
+        for (std::string_view w : kList) {
+            if (s == w) return true;
+        }
+        return false;
+    };
     if (config_.mixedEnglish && hasAnyDict() && lowerBuf.size() >= 2) {
         auto enHits = queryEnglishPrefixAll(lowerBuf, 8);
         const bool partialFallback = !paths.empty() && std::any_of(
@@ -524,9 +564,17 @@ void BilingualEngine::rebuildCandidates() {
             const bool exactEn = (lowerEn == lowerBuf);
             const bool isCommonEn = (enHits[i].freq >= 1000);
             const uint32_t enTier = userDict_.getTier(lowerEn, enHits[i].word);
+            const bool isDemotedTwoCharEn =
+                (exactEn && lowerBuf.size() == 2 && !hasFullExactChinese && enTier == 0 && !isTwoLetterWhitelist(lowerEn));
             int enGroup = 55;
             if (exactEn) {
-                enGroup = hasFullExactChinese ? 80 : 95;
+                if (hasFullExactChinese) {
+                    enGroup = 80;
+                } else if (isDemotedTwoCharEn) {
+                    enGroup = 82;
+                } else {
+                    enGroup = 95;
+                }
             } else if (!hasFullExactChinese && lowerBuf.size() >= 3 && (partialFallback || isCommonEn)) {
                 enGroup = isCommonEn ? 74 : 64;
             } else if (isCommonEn && lowerBuf.size() >= 3) {
@@ -540,6 +588,7 @@ void BilingualEngine::rebuildCandidates() {
             if (page1SurfaceEnWord.empty() && (isCommonEn || enTier >= 1) &&
                 (exactEn || (!hasFullExactChinese && lowerBuf.size() >= 3))) {
                 page1SurfaceEnWord = enHits[i].word;
+                page1SurfaceTargetIdx = isDemotedTwoCharEn ? 3 : 2;
             }
         }
     }
@@ -568,7 +617,7 @@ void BilingualEngine::rebuildCandidates() {
         });
         if (it != candidates_.end()) {
             size_t curIdx = static_cast<size_t>(std::distance(candidates_.begin(), it));
-            size_t targetIdx = std::min<size_t>(2, candidates_.size() - 1);
+            size_t targetIdx = std::min<size_t>(page1SurfaceTargetIdx, candidates_.size() - 1);
             if (curIdx > targetIdx) {
                 CandidateItem promoted = std::move(*it);
                 candidates_.erase(it);

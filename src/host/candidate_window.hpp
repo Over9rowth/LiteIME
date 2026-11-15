@@ -60,7 +60,6 @@ private:
     void renderAndShow();
     void ensureD2DResources();
     void releaseD2DResources();
-    void triggerVirtualKey(WORD vk);
 
     HWND hwnd_ = nullptr;
     HWND hostHwnd_ = nullptr;

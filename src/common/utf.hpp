@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -75,6 +77,28 @@ inline std::string utf16_to_utf8(std::wstring_view utf16) {
         }
     }
     return out;
+}
+
+// Copies up to dstCap - 1 bytes of UTF-8 text without splitting a multi-byte sequence.
+// Always null-terminates dst (when dst != nullptr && dstCap > 0) and returns bytes copied.
+inline size_t copyUtf8Bounded(std::string_view src, char* dst, size_t dstCap) {
+    if (!dst || dstCap == 0) return 0;
+    if (src.empty() || dstCap == 1) {
+        dst[0] = '\0';
+        return 0;
+    }
+    size_t n = std::min(src.size(), dstCap - 1);
+    if (n < src.size()) {
+        // Back up past any UTF-8 continuation bytes (10xxxxxx) at the cut boundary
+        while (n > 0 && (static_cast<unsigned char>(src[n]) & 0xC0) == 0x80) {
+            --n;
+        }
+    }
+    if (n > 0) {
+        std::memcpy(dst, src.data(), n);
+    }
+    dst[n] = '\0';
+    return n;
 }
 
 } // namespace liteime

@@ -6,11 +6,134 @@
 namespace liteime::tsf {
 
 PipeClient::~PipeClient() {
+    stopNotify();
     disconnect();
     if (ioEvent_) {
         CloseHandle(static_cast<HANDLE>(ioEvent_));
         ioEvent_ = nullptr;
     }
+}
+
+void PipeClient::startNotify(NotifyCallback cb) {
+    stopNotify();
+    notifyCb_ = std::move(cb);
+    notifyStopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!notifyStopEvent_) return;
+    try {
+        notifyThread_ = std::thread(&PipeClient::notifyLoop, this);
+    } catch (...) {
+        CloseHandle(static_cast<HANDLE>(notifyStopEvent_));
+        notifyStopEvent_ = nullptr;
+    }
+}
+
+void PipeClient::stopNotify() {
+    if (notifyStopEvent_) {
+        SetEvent(static_cast<HANDLE>(notifyStopEvent_));
+    }
+    if (notifyThread_.joinable()) {
+        notifyThread_.join();
+    }
+    if (notifyStopEvent_) {
+        CloseHandle(static_cast<HANDLE>(notifyStopEvent_));
+        notifyStopEvent_ = nullptr;
+    }
+    notifyCb_ = {};
+}
+
+void PipeClient::notifyLoop() {
+    HANDLE stopEvt = static_cast<HANDLE>(notifyStopEvent_);
+    HANDLE ioEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ioEvt || !stopEvt) {
+        if (ioEvt) CloseHandle(ioEvt);
+        return;
+    }
+
+    DWORD sessionId = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+    const std::wstring notifyPipeName = ipc::makeNotifyPipeName(sessionId);
+
+    while (WaitForSingleObject(stopEvt, 0) != WAIT_OBJECT_0) {
+        HANDLE hPipe = CreateFileW(
+            notifyPipeName.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            nullptr);
+        if (hPipe == INVALID_HANDLE_VALUE) {
+            if (WaitForSingleObject(stopEvt, 600) == WAIT_OBJECT_0) break;
+            continue;
+        }
+
+        DWORD mode = PIPE_READMODE_MESSAGE;
+        SetNamedPipeHandleState(hPipe, &mode, nullptr, nullptr);
+
+        ipc::NotifyHello hello{};
+        hello.magic = ipc::kProtocolMagic;
+        hello.pid = GetCurrentProcessId();
+        hello.hwnd = 0;
+
+        ResetEvent(ioEvt);
+        OVERLAPPED wov{};
+        wov.hEvent = ioEvt;
+        DWORD bw = 0;
+        BOOL wok = WriteFile(hPipe, &hello, sizeof(hello), &bw, &wov);
+        if (!wok && GetLastError() == ERROR_IO_PENDING) {
+            HANDLE waits[2] = {stopEvt, ioEvt};
+            DWORD wr = WaitForMultipleObjects(2, waits, FALSE, 250);
+            if (wr == WAIT_OBJECT_0 + 1) {
+                wok = GetOverlappedResult(hPipe, &wov, &bw, FALSE);
+            } else {
+                CancelIoEx(hPipe, &wov);
+                DWORD dummy = 0;
+                GetOverlappedResult(hPipe, &wov, &dummy, TRUE);
+                CloseHandle(hPipe);
+                if (wr == WAIT_OBJECT_0) break;
+                continue;
+            }
+        }
+        if (!wok || bw < sizeof(hello)) {
+            CloseHandle(hPipe);
+            if (WaitForSingleObject(stopEvt, 300) == WAIT_OBJECT_0) break;
+            continue;
+        }
+
+        while (WaitForSingleObject(stopEvt, 0) != WAIT_OBJECT_0) {
+            ipc::NotifyPacket pkt{};
+            ResetEvent(ioEvt);
+            OVERLAPPED rov{};
+            rov.hEvent = ioEvt;
+            DWORD br = 0;
+            BOOL rok = ReadFile(hPipe, &pkt, sizeof(pkt), &br, &rov);
+            if (!rok && GetLastError() == ERROR_IO_PENDING) {
+                HANDLE waits[2] = {stopEvt, ioEvt};
+                DWORD wr = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+                if (wr == WAIT_OBJECT_0 + 1) {
+                    rok = GetOverlappedResult(hPipe, &rov, &br, FALSE);
+                } else {
+                    CancelIoEx(hPipe, &rov);
+                    DWORD dummy = 0;
+                    GetOverlappedResult(hPipe, &rov, &dummy, TRUE);
+                    break;
+                }
+            }
+            if (!rok || br < sizeof(pkt)) {
+                break;
+            }
+            if (pkt.magic == ipc::kProtocolMagic &&
+                pkt.type == static_cast<uint16_t>(ipc::NotifyType::ApplyResponse) &&
+                notifyCb_) {
+                notifyCb_(pkt);
+            }
+        }
+
+        CloseHandle(hPipe);
+        if (WaitForSingleObject(stopEvt, 150) == WAIT_OBJECT_0) break;
+    }
+
+    CloseHandle(ioEvt);
 }
 
 void PipeClient::disconnect() {

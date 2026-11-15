@@ -3,11 +3,18 @@
 
 namespace liteime::tsf {
 
+namespace {
+constexpr const wchar_t* kTsfNotifyClass = L"LiteIME_TsfNotifyWindow";
+constexpr UINT kWmApplyNotify = WM_APP + 201;
+} // namespace
+
 CTextService::CTextService() {
     DllAddRef();
 }
 
 CTextService::~CTextService() {
+    pipe_.stopNotify();
+    uninitNotifyWindow();
     clearCompositionRef();
     uninitKeyEventSink();
     uninitThreadMgrSink();
@@ -85,13 +92,22 @@ STDMETHODIMP CTextService::ActivateEx(ITfThreadMgr* ptim, TfClientId tid, DWORD)
     req.type = hasFocus ? ipc::MsgType::FocusChanged : ipc::MsgType::Ping;
     req.focusGained = hasFocus ? 1 : 0;
     req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
+    if (hasFocus && req.hwnd != 0) activeHwnd_ = req.hwnd;
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
+
+    initNotifyWindow();
+    pipe_.startNotify([this](const ipc::NotifyPacket& pkt) {
+        enqueueNotify(pkt);
+    });
 
     return S_OK;
 }
 
 STDMETHODIMP CTextService::Deactivate() {
+    pipe_.stopNotify();
+    uninitNotifyWindow();
+
     ipc::Request req{};
     req.type = ipc::MsgType::FocusChanged;
     req.focusGained = 0;
@@ -99,6 +115,7 @@ STDMETHODIMP CTextService::Deactivate() {
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
 
+    activeHwnd_ = 0;
     clearCompositionRef();
     updateTextEditSink(nullptr);
     uninitKeyEventSink();
@@ -110,6 +127,87 @@ STDMETHODIMP CTextService::Deactivate() {
     }
     clientId_ = TF_CLIENTID_NULL;
     return S_OK;
+}
+
+void CTextService::initNotifyWindow() {
+    if (notifyHwnd_) return;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = notifyWndProc;
+    wc.hInstance = g_hInst;
+    wc.lpszClassName = kTsfNotifyClass;
+    RegisterClassExW(&wc);
+
+    notifyHwnd_ = CreateWindowExW(
+        0, kTsfNotifyClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, g_hInst, this);
+}
+
+void CTextService::uninitNotifyWindow() {
+    if (notifyHwnd_) {
+        DestroyWindow(notifyHwnd_);
+        notifyHwnd_ = nullptr;
+    }
+    std::lock_guard<std::mutex> lock(notifyMutex_);
+    pendingNotifies_.clear();
+}
+
+void CTextService::enqueueNotify(const ipc::NotifyPacket& pkt) {
+    HWND dst = notifyHwnd_;
+    if (!dst) return;
+    {
+        std::lock_guard<std::mutex> lock(notifyMutex_);
+        if (pendingNotifies_.size() < 32) {
+            pendingNotifies_.push_back(pkt);
+        }
+    }
+    PostMessageW(dst, kWmApplyNotify, 0, 0);
+}
+
+void CTextService::drainNotifyQueue() {
+    std::vector<ipc::NotifyPacket> batch;
+    {
+        std::lock_guard<std::mutex> lock(notifyMutex_);
+        batch.swap(pendingNotifies_);
+    }
+    if (batch.empty() || !threadMgr_) return;
+
+    for (const auto& pkt : batch) {
+        if (pkt.targetHwnd != 0 && activeHwnd_ != 0 && pkt.targetHwnd != activeHwnd_ && !isComposing_) {
+            continue;
+        }
+        const ipc::Response& resp = pkt.response;
+        const bool hasTextChange = (resp.commitLen > 0 || resp.preeditLen > 0 || isComposing_);
+        if (!hasTextChange) continue;
+
+        ITfContext* pic = textEditContext_;
+        if (pic) {
+            pic->AddRef();
+        } else {
+            ITfDocumentMgr* pdim = nullptr;
+            if (SUCCEEDED(threadMgr_->GetFocus(&pdim)) && pdim) {
+                pdim->GetTop(&pic);
+                pdim->Release();
+            }
+        }
+        if (pic) {
+            applyResponseAsync(pic, resp, false, 0, 0, activeHwnd_);
+            pic->Release();
+        }
+    }
+}
+
+LRESULT CALLBACK CTextService::notifyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return TRUE;
+    }
+    auto* self = reinterpret_cast<CTextService*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (self && msg == kWmApplyNotify) {
+        self->drainNotifyQueue();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 void CTextService::initDisplayAttributeAtom() {

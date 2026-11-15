@@ -303,6 +303,39 @@ HRESULT CTextService::applyResponseInSession(TfEditCookie ec, ITfContext* pConte
     return S_OK;
 }
 
+void CTextService::applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
+                                      bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal) {
+    if (!pic || clientId_ == TF_CLIENTID_NULL) return;
+    const bool hasTextChange = (resp.commitLen > 0 || resp.preeditLen > 0 || isComposing_);
+    if (!hasTextChange) return;
+
+    RECT postRc{};
+    BOOL postFound = FALSE;
+    {
+        ScopedPerMonitorDpi dpiGuard;
+        auto* sess = new CApplyResponseSession(this, pic, resp, &postRc, &postFound);
+        HRESULT hrSession = S_OK;
+        pic->RequestEditSession(clientId_, sess, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
+        sess->Release();
+    }
+    if (postFound && resp.preeditLen > 0) {
+        int newX = static_cast<int>(postRc.left);
+        int newY = static_cast<int>(postRc.bottom);
+        int newH = (postRc.bottom > postRc.top) ? static_cast<int>(postRc.bottom - postRc.top) : 20;
+        if (!hasPreCaret || std::abs(newX - preCaretX) > 2 || std::abs(newY - preCaretY) > 2) {
+            ipc::Request upd{};
+            upd.type = ipc::MsgType::UpdateCaret;
+            upd.hasCaret = 1;
+            upd.caretX = newX;
+            upd.caretY = newY;
+            upd.caretHeight = newH;
+            upd.hwnd = hwndVal;
+            ipc::Response updResp{};
+            pipe_.sendRequest(upd, updResp);
+        }
+    }
+}
+
 HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM lParam,
                                         bool isKeyUp, bool testOnly, BOOL* pfEaten) {
     if (pfEaten) *pfEaten = FALSE;
@@ -314,6 +347,9 @@ HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM l
     req.modifiers = currentModifiers();
     req.isKeyUp = isKeyUp ? 1 : 0;
     req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
+    if (!testOnly && req.hwnd != 0) {
+        activeHwnd_ = req.hwnd;
+    }
 
     if (!testOnly && !isKeyUp) {
         fillCaretPos(pic, req);
@@ -328,35 +364,9 @@ HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM l
         *pfEaten = resp.consumed ? TRUE : FALSE;
     }
 
-    if (!testOnly && resp.consumed && pic) {
-        const bool hasTextChange = (resp.commitLen > 0 || resp.preeditLen > 0 || isComposing_);
-        if (hasTextChange) {
-            RECT postRc{};
-            BOOL postFound = FALSE;
-            {
-                ScopedPerMonitorDpi dpiGuard;
-                auto* sess = new CApplyResponseSession(this, pic, resp, &postRc, &postFound);
-                HRESULT hrSession = S_OK;
-                pic->RequestEditSession(clientId_, sess, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
-                sess->Release();
-            }
-            if (postFound && resp.preeditLen > 0) {
-                int newX = static_cast<int>(postRc.left);
-                int newY = static_cast<int>(postRc.bottom);
-                int newH = (postRc.bottom > postRc.top) ? static_cast<int>(postRc.bottom - postRc.top) : 20;
-                if (!req.hasCaret || std::abs(newX - req.caretX) > 2 || std::abs(newY - req.caretY) > 2) {
-                    ipc::Request upd{};
-                    upd.type = ipc::MsgType::UpdateCaret;
-                    upd.hasCaret = 1;
-                    upd.caretX = newX;
-                    upd.caretY = newY;
-                    upd.caretHeight = newH;
-                    upd.hwnd = req.hwnd;
-                    ipc::Response updResp{};
-                    pipe_.sendRequest(upd, updResp);
-                }
-            }
-        }
+    // Apply edits when key was consumed OR when host silently left composing state while TSF still shows inline preedit.
+    if (!testOnly && pic && (resp.consumed || (isComposing_ && !resp.isComposing))) {
+        applyResponseAsync(pic, resp, req.hasCaret != 0, req.caretX, req.caretY, req.hwnd);
     }
     return S_OK;
 }

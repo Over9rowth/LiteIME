@@ -2,8 +2,89 @@
 
 #include <algorithm>
 #include <fstream>
+#include <sstream>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace liteime::engine {
+
+namespace {
+
+bool atomicWriteTextFile(const std::filesystem::path& path, std::string_view content) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+
+    std::filesystem::path tmpPath = path;
+    tmpPath += L".tmp";
+    {
+        std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!ofs) return false;
+        if (!content.empty()) {
+            ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
+        }
+        ofs.flush();
+        if (!ofs.good()) {
+            ofs.close();
+            std::filesystem::remove(tmpPath, ec);
+            return false;
+        }
+    }
+
+#ifdef _WIN32
+    if (MoveFileExW(tmpPath.c_str(), path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+#endif
+    std::filesystem::rename(tmpPath, path, ec);
+    if (!ec) return true;
+    std::filesystem::remove(tmpPath, ec);
+    return false;
+}
+
+std::string escapeQuickField(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '\t': out += "\\t"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+std::string unescapeQuickField(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            char nxt = s[i + 1];
+            if (nxt == '\\') { out.push_back('\\'); ++i; continue; }
+            if (nxt == 't') { out.push_back('\t'); ++i; continue; }
+            if (nxt == 'n') { out.push_back('\n'); ++i; continue; }
+            if (nxt == 'r') { out.push_back('\r'); ++i; continue; }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
+} // namespace
 
 bool UserDict::load(const std::filesystem::path& path) {
     path_ = path;
@@ -59,19 +140,14 @@ bool UserDict::load(const std::filesystem::path& path) {
 
 bool UserDict::save() const {
     if (path_.empty()) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(path_.parent_path(), ec);
-
-    std::ofstream ofs(path_, std::ios::trunc);
-    if (!ofs) return false;
-
-    ofs << "# LiteIME User Dictionary (pinyin\\tword\\tcount\\tlastUsed)\n";
+    std::ostringstream oss;
+    oss << "# LiteIME User Dictionary (pinyin\\tword\\tcount\\tlastUsed)\n";
     for (const auto& [key, vec] : entries_) {
         for (const auto& e : vec) {
-            ofs << key << '\t' << e.word << '\t' << e.count << '\t' << e.lastUsed << '\n';
+            oss << key << '\t' << e.word << '\t' << e.count << '\t' << e.lastUsed << '\n';
         }
     }
-    bool ok = ofs.good();
+    const bool ok = atomicWriteTextFile(path_, oss.str());
     if (ok) dirty_ = false;
     return ok;
 }
@@ -293,29 +369,17 @@ bool UserDict::loadPins(const std::filesystem::path& path) {
 bool UserDict::savePins() const {
     auto p = pinsPath();
     if (p.empty()) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream ofs(p, std::ios::trunc);
-    if (!ofs) return false;
-    ofs << "# LiteIME Pinned Candidates (rawKey\\tslot0..4\\tword)\n";
+    std::ostringstream oss;
+    oss << "# LiteIME Pinned Candidates (rawKey\\tslot0..4\\tword)\n";
     for (const auto& [key, vec] : pins_) {
         for (const auto& e : vec) {
-            ofs << key << '\t' << e.slot << '\t' << e.word << '\n';
+            oss << key << '\t' << e.slot << '\t' << e.word << '\n';
         }
     }
-    return ofs.good();
+    return atomicWriteTextFile(p, oss.str());
 }
 
 void UserDict::setQuickInputs(std::vector<QuickInputItem> items) {
-    for (auto& it : items) {
-        auto cleanField = [](std::string& s) {
-            for (char& c : s) {
-                if (c == '\t' || c == '\r' || c == '\n') c = ' ';
-            }
-        };
-        cleanField(it.label);
-        cleanField(it.value);
-    }
     items.erase(std::remove_if(items.begin(), items.end(), [](const QuickInputItem& q) {
         return q.value.empty();
     }), items.end());
@@ -373,8 +437,8 @@ bool UserDict::loadQuickInputs(const std::filesystem::path& path) {
         if (line.empty() || line[0] == '#') continue;
         size_t t1 = line.find('\t');
         if (t1 == std::string::npos) continue;
-        std::string label = line.substr(0, t1);
-        std::string value = line.substr(t1 + 1);
+        std::string label = unescapeQuickField(std::string_view(line.data(), t1));
+        std::string value = unescapeQuickField(std::string_view(line.data() + t1 + 1, line.size() - t1 - 1));
         if (!value.empty()) {
             quickInputs_.push_back(QuickInputItem{std::move(label), std::move(value)});
         }
@@ -385,15 +449,12 @@ bool UserDict::loadQuickInputs(const std::filesystem::path& path) {
 bool UserDict::saveQuickInputs() const {
     auto p = quickInputsPath();
     if (p.empty()) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream ofs(p, std::ios::trunc);
-    if (!ofs) return false;
-    ofs << "# LiteIME Quick Input Snippets (label\\tvalue)\n";
+    std::ostringstream oss;
+    oss << "# LiteIME Quick Input Snippets (label\\tvalue)\n";
     for (const auto& q : quickInputs_) {
-        ofs << q.label << '\t' << q.value << '\n';
+        oss << escapeQuickField(q.label) << '\t' << escapeQuickField(q.value) << '\n';
     }
-    return ofs.good();
+    return atomicWriteTextFile(p, oss.str());
 }
 
 bool UserDict::loadConfig(const std::filesystem::path& path, EngineConfig& cfg) {
@@ -413,8 +474,13 @@ bool UserDict::loadConfig(const std::filesystem::path& path, EngineConfig& cfg) 
         if (k == "pageSize") {
             try { cfg.pageSize = std::clamp(std::stoi(std::string(v)), 5, 8); } catch (...) {}
         } else if (k == "chineseMode") cfg.chineseMode = asBool(v);
+        else if (k == "fullWidth") cfg.fullWidth = asBool(v);
         else if (k == "chinesePunct") cfg.chinesePunct = asBool(v);
         else if (k == "mixedEnglish") cfg.mixedEnglish = asBool(v);
+        else if (k == "smartDecimal") cfg.smartDecimal = asBool(v);
+        else if (k == "autoUrlEnglish") cfg.autoUrlEnglish = asBool(v);
+        else if (k == "shiftTapToggle") cfg.shiftTapToggle = asBool(v);
+        else if (k == "showStatusBar") cfg.showStatusBar = asBool(v);
         else if (k == "typoCorrection") cfg.typoCorrection = asBool(v);
         else if (k == "looseInitialMatch") cfg.looseInitialMatch = asBool(v);
         else if (k == "enableCsPack") cfg.enableCsPack = asBool(v);
@@ -450,16 +516,18 @@ bool UserDict::loadConfig(const std::filesystem::path& path, EngineConfig& cfg) 
 
 bool UserDict::saveConfig(const std::filesystem::path& path, const EngineConfig& cfg) {
     if (path.empty()) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream ofs(path, std::ios::trunc);
-    if (!ofs) return false;
     auto b = [](bool v) { return v ? 1 : 0; };
-    ofs << "# LiteIME Config\n"
+    std::ostringstream oss;
+    oss << "# LiteIME Config\n"
         << "pageSize=" << cfg.pageSize << '\n'
         << "chineseMode=" << b(cfg.chineseMode) << '\n'
+        << "fullWidth=" << b(cfg.fullWidth) << '\n'
         << "chinesePunct=" << b(cfg.chinesePunct) << '\n'
         << "mixedEnglish=" << b(cfg.mixedEnglish) << '\n'
+        << "smartDecimal=" << b(cfg.smartDecimal) << '\n'
+        << "autoUrlEnglish=" << b(cfg.autoUrlEnglish) << '\n'
+        << "shiftTapToggle=" << b(cfg.shiftTapToggle) << '\n'
+        << "showStatusBar=" << b(cfg.showStatusBar) << '\n'
         << "typoCorrection=" << b(cfg.typoCorrection) << '\n'
         << "looseInitialMatch=" << b(cfg.looseInitialMatch) << '\n'
         << "enableCsPack=" << b(cfg.enableCsPack) << '\n'
@@ -484,7 +552,7 @@ bool UserDict::saveConfig(const std::filesystem::path& path, const EngineConfig&
         << "fuzzy.in_ing=" << b(cfg.fuzzy.in_ing) << '\n'
         << "fuzzy.iang_ian=" << b(cfg.fuzzy.iang_ian) << '\n'
         << "fuzzy.uang_uan=" << b(cfg.fuzzy.uang_uan) << '\n';
-    return ofs.good();
+    return atomicWriteTextFile(path, oss.str());
 }
 
 void UserDict::clear() {
