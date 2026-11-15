@@ -1,5 +1,6 @@
 #include "host/pipe_server.hpp"
 #include "host/host_messages.hpp"
+#include "common/utf.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -237,15 +238,43 @@ void PipeServer::handleClient(HANDLE hPipe, uint64_t connId) {
         }
 
         ipc::Response resp{};
-        if (req.magic == ipc::kProtocolMagic && req.version == ipc::kProtocolVersion) {
+        const bool isV1 = (req.version == ipc::kProtocolVersionV1);
+        const bool isV2 = (req.version == ipc::kProtocolVersion);
+        if (req.magic == ipc::kProtocolMagic && (isV1 || isV2)) {
             if (running_.load(std::memory_order_acquire) && onRequest_) {
                 onRequest_(req, resp, connId, static_cast<uint32_t>(clientPid));
             }
         }
 
         DWORD bytesWritten = 0;
-        if (!WriteFile(hPipe, &resp, sizeof(resp), &bytesWritten, nullptr)) {
-            break;
+        if (isV1) {
+            ipc::ResponseV1 respV1{};
+            respV1.magic = resp.magic;
+            respV1.version = ipc::kProtocolVersionV1;
+            respV1.consumed = resp.consumed;
+            respV1.isEnglish = resp.isEnglish;
+            respV1.isFullWidth = resp.isFullWidth;
+            respV1.isCnPunct = resp.isCnPunct;
+            if (resp.preeditLen > 0) {
+                const size_t n = liteime::copyUtf8Bounded(
+                    std::string_view(resp.preedit, std::min<size_t>(resp.preeditLen, sizeof(resp.preedit))),
+                    respV1.preedit, sizeof(respV1.preedit));
+                respV1.preeditLen = static_cast<uint16_t>(n);
+                respV1.caretPos = respV1.preeditLen;
+            }
+            if (resp.commitLen > 0) {
+                const size_t n = liteime::copyUtf8Bounded(
+                    std::string_view(resp.commit, std::min<size_t>(resp.commitLen, sizeof(resp.commit))),
+                    respV1.commit, sizeof(respV1.commit));
+                respV1.commitLen = static_cast<uint16_t>(n);
+            }
+            if (!WriteFile(hPipe, &respV1, sizeof(respV1), &bytesWritten, nullptr)) {
+                break;
+            }
+        } else {
+            if (!WriteFile(hPipe, &resp, sizeof(resp), &bytesWritten, nullptr)) {
+                break;
+            }
         }
     }
     FlushFileBuffers(hPipe);

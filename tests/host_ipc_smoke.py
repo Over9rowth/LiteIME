@@ -12,14 +12,17 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 HOST_EXE = ROOT / "dist" / "LiteIMEHost.exe"
 
 MAGIC = 0x4C494D45
-VERSION = 1
+VERSION = 2
 
 # Match ipc::Request (packed, 44 bytes)
 REQ_FMT = "<IHHIIIBBBBiiiQ"
+# Match ipc::ResponseV1 (legacy packed, 784 bytes)
+RESP_V1_FMT = "<IHBBBBHHH256s512s"
 # Match ipc::Response (packed, 4626 bytes: I H B B B B B B H H H 512s 4096s)
 RESP_FMT = "<IHBBBBBBHHH512s4096s"
 
 assert struct.calcsize(REQ_FMT) == 44
+assert struct.calcsize(RESP_V1_FMT) == 784
 assert struct.calcsize(RESP_FMT) == 4626
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -276,6 +279,16 @@ def main() -> int:
         r_qi_theft = send_ipc(pipe, 2, ord("1"), 0, 0)  # req.hwnd == 0 -> must refuse QuickInput plaintext!
         assert r_qi_theft["commit"] == "", f"Non-foreground pipe client stole QuickInput plaintext: {r_qi_theft!r}"
         assert not r_qi_theft["is_composing"]
+
+        # 9c. Legacy v1 client (784B ResponseV1) backward compatibility when old LiteIME64.dll is still mapped
+        req_v1 = struct.pack(REQ_FMT, MAGIC, 1, 2, ord("N"), 0, 0, 0, 1, 1, 0, 320, 320, 22, 0)
+        resp_v1_buf = ctypes.create_string_buffer(struct.calcsize(RESP_V1_FMT))
+        br_v1 = wt.DWORD()
+        assert kernel32.TransactNamedPipe(pipe, req_v1, len(req_v1), resp_v1_buf, len(resp_v1_buf), ctypes.byref(br_v1), None)
+        assert br_v1.value == 784, f"Expected 784B ResponseV1, got {br_v1.value}"
+        m_v1, v_v1, c_v1, *_ = struct.unpack(RESP_V1_FMT, resp_v1_buf.raw)
+        assert m_v1 == MAGIC and v_v1 == 1 and c_v1 == 1
+        send_ipc(pipe, 2, 0x1B, 0, 0)
 
         # 10. Modal UI non-blocking & multi-client IPC concurrency regression test:
         # Open QuickInput manager / modal warning via "vvv" -> '2' (QuickInputSetup slot), then slam IPC from 4 worker threads.

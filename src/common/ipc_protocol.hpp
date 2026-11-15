@@ -7,7 +7,10 @@
 namespace liteime::ipc {
 
 constexpr uint32_t kProtocolMagic = 0x4C494D45; // 'LIME'
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersionV1 = 1;
+constexpr uint16_t kProtocolVersion = 2;
+constexpr size_t kMaxPreeditBytesV1 = 256;
+constexpr size_t kMaxCommitBytesV1 = 512;
 constexpr size_t kMaxPreeditBytes = 512;
 constexpr size_t kMaxCommitBytes = 4096;
 
@@ -45,6 +48,20 @@ struct Request {
     uint64_t hwnd = 0;
 };
 
+struct ResponseV1 {
+    uint32_t magic = kProtocolMagic;
+    uint16_t version = kProtocolVersionV1;
+    uint8_t consumed = 0;
+    uint8_t isEnglish = 0;
+    uint8_t isFullWidth = 0;
+    uint8_t isCnPunct = 1;
+    uint16_t preeditLen = 0;
+    uint16_t commitLen = 0;
+    uint16_t caretPos = 0;
+    char preedit[kMaxPreeditBytesV1] = {};
+    char commit[kMaxCommitBytesV1] = {};
+};
+
 struct Response {
     uint32_t magic = kProtocolMagic;
     uint16_t version = kProtocolVersion;
@@ -80,6 +97,8 @@ struct NotifyPacket {
 };
 #pragma pack(pop)
 
+static_assert(sizeof(ResponseV1) == 16 + kMaxPreeditBytesV1 + kMaxCommitBytesV1,
+              "ResponseV1 wire size must match legacy packed protocol layout");
 static_assert(sizeof(Response) == 18 + kMaxPreeditBytes + kMaxCommitBytes,
               "Response wire size must match packed protocol layout");
 
