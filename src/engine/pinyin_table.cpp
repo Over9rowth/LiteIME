@@ -95,8 +95,21 @@ std::string SegmentPath::initialsKey() const {
     return out;
 }
 
+std::string PinyinTable::canonicalizeSyllable(std::string_view token) {
+    if (token == "nue") return "nve";
+    if (token == "lue") return "lve";
+    if (token.size() >= 2 &&
+        (token[0] == 'j' || token[0] == 'q' || token[0] == 'x' || token[0] == 'y') &&
+        token[1] == 'v') {
+        std::string out(token);
+        out[1] = 'u';
+        return out;
+    }
+    return std::string(token);
+}
+
 bool PinyinTable::isValidSyllable(std::string_view s) {
-    return syllableSet().count(s) > 0;
+    return syllableSet().count(canonicalizeSyllable(s)) > 0;
 }
 
 bool PinyinTable::isValidInitial(std::string_view s) {
@@ -108,7 +121,7 @@ bool PinyinTable::isValidInitial(std::string_view s) {
 }
 
 bool PinyinTable::isSyllablePrefix(std::string_view s) {
-    return prefixSet().count(s) > 0;
+    return prefixSet().count(canonicalizeSyllable(s)) > 0;
 }
 
 std::string PinyinTable::extractInitial(std::string_view syllable) {
@@ -123,9 +136,10 @@ std::string PinyinTable::extractInitial(std::string_view syllable) {
 std::vector<std::string_view> PinyinTable::syllablesWithPrefix(std::string_view prefix) {
     std::vector<std::string_view> out;
     if (prefix.empty()) return out;
+    const std::string norm = canonicalizeSyllable(prefix);
     for (const char* item : kValidSyllables) {
         std::string_view sv(item);
-        if (sv.starts_with(prefix)) {
+        if (sv.starts_with(norm)) {
             out.push_back(sv);
         }
     }
@@ -179,9 +193,10 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
 
             for (size_t len = maxLen; len >= 1; --len) {
                 std::string_view sub = sv.substr(i, len);
-                bool full = isValidSyllable(sub);
+                std::string normSub = canonicalizeSyllable(sub);
+                bool full = syllableSet().count(normSub) > 0;
                 bool atEnd = (i + len == n);
-                bool partialInitial = !full && (isValidInitial(sub) || (atEnd && isSyllablePrefix(sub)));
+                bool partialInitial = !full && (isValidInitial(normSub) || (atEnd && prefixSet().count(normSub) > 0));
 
                 if (!full && !partialInitial) continue;
                 if (full) matchedFull = true;
@@ -192,7 +207,7 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
                     stepScore = static_cast<int>(len * 14) - 8;
                     if (len == 1 && isVowel(sub[0])) stepScore -= 6;
                     // Lookahead penalty if splitting leaves an awkward consonant-less orphan when longer exists
-                    if (i + len < n && sv[i + len] == 'g' && (sub.ends_with("an") || sub.ends_with("en") || sub.ends_with("in"))) {
+                    if (i + len < n && sv[i + len] == 'g' && (normSub.ends_with("an") || normSub.ends_with("en") || normSub.ends_with("in"))) {
                         stepScore -= 10;
                     }
                 } else {
@@ -200,7 +215,7 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
                     stepScore = atEnd ? static_cast<int>(len * 4) - 10 : -14;
                 }
 
-                SyllableToken tok{std::string(sub), !full, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
+                SyllableToken tok{std::move(normSub), !full, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
                 for (const auto& prev : dp[i]) {
                     SegmentPath nextPath = prev;
                     nextPath.tokens.push_back(tok);
@@ -265,11 +280,12 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
 }
 
 std::vector<std::string> PinyinTable::expandFuzzy(std::string_view syllable, const FuzzyConfig& fuzzy) {
+    const std::string canon = canonicalizeSyllable(syllable);
     std::vector<std::string> results;
-    results.emplace_back(syllable);
+    results.push_back(canon);
 
     auto addIfValid = [&](const std::string& cand) {
-        if (cand != syllable && isValidSyllable(cand)) {
+        if (cand != canon && syllableSet().count(cand) > 0) {
             if (std::find(results.begin(), results.end(), cand) == results.end()) {
                 results.push_back(cand);
             }
@@ -278,13 +294,13 @@ std::vector<std::string> PinyinTable::expandFuzzy(std::string_view syllable, con
 
     // Initial expansions
     std::vector<std::string> initialVariants;
-    initialVariants.emplace_back(syllable);
+    initialVariants.push_back(canon);
 
     auto trySwapPrefix = [&](std::string_view a, std::string_view b) {
-        if (syllable.starts_with(a)) {
-            initialVariants.push_back(std::string(b) + std::string(syllable.substr(a.size())));
-        } else if (syllable.starts_with(b)) {
-            initialVariants.push_back(std::string(a) + std::string(syllable.substr(b.size())));
+        if (std::string_view(canon).starts_with(a)) {
+            initialVariants.push_back(std::string(b) + canon.substr(a.size()));
+        } else if (std::string_view(canon).starts_with(b)) {
+            initialVariants.push_back(std::string(a) + canon.substr(b.size()));
         }
     };
 
@@ -321,22 +337,15 @@ std::vector<std::string> PinyinTable::suggestSyllableTypos(std::string_view rawT
         return results;
     }
 
+    // Start from v/ü-normalized token so typos inside jv/qv/xv/yv tokens (e.g. qvna -> quna -> quan) still resolve.
+    std::string base = canonicalizeSyllable(rawToken);
     auto addIfValid = [&](const std::string& cand) {
-        if (cand != rawToken && isValidSyllable(cand)) {
+        if (cand != base && syllableSet().count(cand) > 0) {
             if (std::find(results.begin(), results.end(), cand) == results.end()) {
                 results.push_back(cand);
             }
         }
     };
-
-    std::string base(rawToken);
-
-    // 1. j/q/x/y + v -> u (very common pinyin typing habit: jv->ju, xve->xue, qvan->quan)
-    if ((base[0] == 'j' || base[0] == 'q' || base[0] == 'x' || base[0] == 'y') && base.find('v') != std::string::npos) {
-        std::string cand = base;
-        std::replace(cand.begin(), cand.end(), 'v', 'u');
-        addIfValid(cand);
-    }
 
     // 2. Adjacent character transposition (e.g. zhogn->zhong, zohng->zhong, hzong->zhong, xui->xiu, goa->gao)
     for (size_t i = 0; i + 1 < base.size(); ++i) {
@@ -434,10 +443,11 @@ std::vector<SegmentPath> PinyinTable::segmentWithTypos(std::string_view input, s
             const size_t maxValidLen = std::min<size_t>(6, n - i);
             for (size_t len = maxValidLen; len >= 1; --len) {
                 std::string_view sub = sv.substr(i, len);
-                if (!isValidSyllable(sub)) continue;
+                std::string normSub = canonicalizeSyllable(sub);
+                if (syllableSet().count(normSub) == 0) continue;
                 int stepScore = static_cast<int>(len * 14) - 8;
                 if (len == 1 && isVowel(sub[0])) stepScore -= 6;
-                SyllableToken tok{std::string(sub), false, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
+                SyllableToken tok{std::move(normSub), false, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
                 for (const auto& prev : dp[i]) {
                     State nxt = prev;
                     nxt.tokens.push_back(tok);
@@ -477,9 +487,10 @@ std::vector<SegmentPath> PinyinTable::segmentWithTypos(std::string_view input, s
             for (size_t len = 1; len <= std::min<size_t>(2, n - i); ++len) {
                 if (i + len != n) continue;
                 std::string_view sub = sv.substr(i, len);
-                if (isValidSyllable(sub)) continue;
-                if (isValidInitial(sub) || isSyllablePrefix(sub)) {
-                    SyllableToken tok{std::string(sub), true, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
+                std::string normSub = canonicalizeSyllable(sub);
+                if (syllableSet().count(normSub) > 0) continue;
+                if (isValidInitial(normSub) || prefixSet().count(normSub) > 0) {
+                    SyllableToken tok{std::move(normSub), true, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
                     for (const auto& prev : dp[i]) {
                         State nxt = prev;
                         nxt.tokens.push_back(tok);

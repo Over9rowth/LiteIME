@@ -104,6 +104,22 @@ std::filesystem::path buildFixtureDict(const std::filesystem::path& dir) {
         {"王二", "wang er", 13000, 2},
         {"为恶", "wei e", 7500, 2},
         {"婉儿", "wan er", 8000, 2},
+        {"居", "ju", 52000, 1},
+        {"局", "ju", 46000, 1},
+        {"女", "nv", 9000, 1},
+        {"怒", "nu", 8000, 1},
+        {"女儿", "nv er", 50000, 2},
+        {"去", "qu", 70000, 1},
+        {"去年", "qu nian", 65000, 2},
+        {"全", "quan", 55000, 1},
+        {"需", "xu", 54000, 1},
+        {"雨", "yu", 72000, 1},
+        {"语", "yu", 60000, 1},
+        {"语言", "yu yan", 68000, 2},
+        {"决定", "jue ding", 62000, 2},
+        {"觉", "jue", 48000, 1},
+        {"虐", "nve", 3000, 1},
+        {"略", "lve", 3000, 1},
     };
     std::vector<RawEnglishRecord> english = {
         {"python", "Python", 50000},
@@ -1074,6 +1090,70 @@ int wmain() {
         CHECK(UserDict::loadConfig(tmpCfg, cfgIn));
         CHECK(cfgIn.looseInitialMatch == true);
         std::filesystem::remove(tmpCfg);
+    }
+
+    // 25. Mandarin u/v alias normalization: jv(居), nv(女), qv(去), xv(需), yv(雨), jve/qvan/nue/lue & multi-syllable words
+    {
+        CHECK(PinyinTable::canonicalizeSyllable("jv") == "ju");
+        CHECK(PinyinTable::canonicalizeSyllable("qv") == "qu");
+        CHECK(PinyinTable::canonicalizeSyllable("xv") == "xu");
+        CHECK(PinyinTable::canonicalizeSyllable("yv") == "yu");
+        CHECK(PinyinTable::canonicalizeSyllable("nv") == "nv");
+        CHECK(PinyinTable::canonicalizeSyllable("nu") == "nu");
+        CHECK(PinyinTable::canonicalizeSyllable("nue") == "nve");
+        CHECK(PinyinTable::canonicalizeSyllable("lue") == "lve");
+
+        BilingualEngine eng;
+        eng.setDictionary(&dict);
+        eng.config().inlinePreedit = InlinePreeditMode::CommittedPlusPinyin;
+
+        auto expectTop = [&](const std::string& keys, const std::string& expectedHdr, const std::string& expectedTop) {
+            typeWord(eng, keys);
+            CHECK(eng.formattedHeader() == expectedHdr);
+            auto items = eng.currentPageItems();
+            CHECK(!items.empty() && items[0].text == expectedTop);
+            CHECK(items[0].kind != CandidateKind::TypoCorrection);
+            eng.handleKey(0x1B, 0, false);
+        };
+
+        expectTop("jv", "jv", "居");
+        expectTop("nv", "nv", "女");
+        expectTop("nu", "nu", "怒");
+        expectTop("qv", "qv", "去");
+        expectTop("xv", "xv", "需");
+        expectTop("yv", "yv", "雨");
+        expectTop("jve", "jve", "觉");
+        expectTop("qvan", "qvan", "全");
+        expectTop("nue", "nue", "虐");
+        expectTop("lue", "lue", "略");
+        expectTop("nver", "nv'er", "女儿");
+        expectTop("qvnian", "qv'nian", "去年");
+        expectTop("yvyan", "yv'yan", "语言");
+        expectTop("jveding", "jve'ding", "决定");
+
+        // Typo inside jv/qv/xv/yv tokens still resolves (e.g. qvxan -> quxan -> quan)
+        typeWord(eng, "qvxan");
+        CHECK(!eng.currentPageItems().empty() && eng.currentPageItems()[0].text == "全");
+        eng.handleKey(0x1B, 0, false);
+
+        // User frequency learning (2 selections -> tier 1) shares canonical key across "jv" and "ju"
+        for (int rep = 0; rep < 2; ++rep) {
+            typeWord(eng, "jv");
+            const auto items = eng.currentPageItems();
+            int juIdx = -1;
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (items[i].text == "局") { juIdx = static_cast<int>(i); break; }
+            }
+            CHECK(juIdx >= 0);
+            auto sel = eng.handleKey(static_cast<uint32_t>('1' + juIdx), 0, false);
+            CHECK(sel.commitText == "局");
+        }
+        typeWord(eng, "jv");
+        CHECK(!eng.currentPageItems().empty() && eng.currentPageItems()[0].text == "局");
+        eng.handleKey(0x1B, 0, false);
+        typeWord(eng, "ju");
+        CHECK(!eng.currentPageItems().empty() && eng.currentPageItems()[0].text == "局");
+        eng.handleKey(0x1B, 0, false);
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

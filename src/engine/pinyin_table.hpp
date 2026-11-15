@@ -26,6 +26,8 @@ struct SegmentPath {
 
 class PinyinTable {
 public:
+    // Normalizes keyboard v/u aliases (j/q/x/y + v* -> u*, nue->nve, lue->lve; keeps nv/lv distinct from nu/lu).
+    static std::string canonicalizeSyllable(std::string_view token);
     static bool isValidSyllable(std::string_view s);
     static bool isValidInitial(std::string_view s);
     static bool isSyllablePrefix(std::string_view s);
