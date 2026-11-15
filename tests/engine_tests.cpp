@@ -1279,6 +1279,94 @@ int wmain() {
         CHECK(!fgItems.empty() && fgItems[0].text == "方案");
         CHECK(t1Eng.formattedHeader() == "fang'an");
         t1Eng.handleKey(0x1B, 0, false);
+
+        // Codex Finding 2: UserDict::removeEntry & unpin last-item and non-last-item safety + saveIfDirty before reload
+        {
+            UserDict udFix;
+            auto udFile = tmpDir / "codex_ud" / "user_dict.tsv";
+            std::filesystem::remove_all(udFile.parent_path());
+            udFix.load(udFile);
+            udFix.recordSelection("ceshi", "测试");
+            udFix.recordSelection("ceshi", "测视");
+            CHECK(udFix.dirty());
+            // Save before reload preserves unsaved entries
+            CHECK(udFix.saveIfDirty());
+            udFix.load(udFile);
+            CHECK(udFix.lookup("ceshi").size() == 2);
+            // Delete non-last then last item under same key (must not UAF on vec after erase)
+            CHECK(udFix.removeEntry("ceshi", "测视"));
+            CHECK(udFix.dirty());
+            CHECK(!udFix.removeEntry("ceshi", "不存在"));
+            CHECK(udFix.removeEntry("ceshi", "测试"));
+            CHECK(udFix.lookup("ceshi").empty());
+            CHECK(udFix.dirty());
+
+            udFix.setPin("ni", 0, "你");
+            udFix.setPin("ni", 1, "拟");
+            CHECK(!udFix.unpin("ni", "不存在"));
+            CHECK(udFix.unpin("ni", "拟"));
+            CHECK(udFix.unpin("ni", "你"));
+            CHECK(udFix.getPins("ni").empty());
+            CHECK(!udFix.unpin("ni", "你"));
+        }
+
+        // Codex Finding 3: Auto URL / Email detection (www.example.com, alice@example.com, https://example.com)
+        {
+            BilingualEngine urlEng;
+            urlEng.setDictionary(&t1Dict);
+            urlEng.config().autoUrlEnglish = true;
+
+            auto sendSeq = [&](std::string_view seq) {
+                for (char c : seq) {
+                    if (c >= 'a' && c <= 'z') {
+                        urlEng.handleKey(static_cast<uint32_t>(c - 'a' + 'A'), 0, false);
+                    } else if (c >= '0' && c <= '9') {
+                        urlEng.handleKey(static_cast<uint32_t>(c), 0, false);
+                    } else if (c == '.') {
+                        urlEng.handleKey(0xBE, 0, false); // VK_OEM_PERIOD
+                    } else if (c == '/') {
+                        urlEng.handleKey(0xBF, 0, false); // VK_OEM_2
+                    } else if (c == '-') {
+                        urlEng.handleKey(0xBD, 0, false); // VK_OEM_MINUS
+                    } else if (c == '@') {
+                        urlEng.handleKey('2', 1u /* ModShift */, false);
+                    } else if (c == ':') {
+                        urlEng.handleKey(0xBA, 1u /* ModShift */, false); // VK_OEM_1
+                    }
+                }
+            };
+
+            // 1) www.example.com
+            sendSeq("www.example.com");
+            CHECK(urlEng.isComposing());
+            auto wItems = urlEng.currentPageItems();
+            CHECK(!wItems.empty() && wItems[0].text == "www.example.com");
+            auto wCommit = urlEng.handleKey(0x0D, 0, false); // Enter
+            CHECK(wCommit.consumed && wCommit.commitText == "www.example.com");
+
+            // 2) alice@example.com
+            sendSeq("alice@example.com");
+            CHECK(urlEng.isComposing());
+            auto eItems = urlEng.currentPageItems();
+            CHECK(!eItems.empty() && eItems[0].text == "alice@example.com");
+            // Verify Backspace all the way out of '@' exits URL mode cleanly
+            auto eCommit = urlEng.handleKey(0x20, 0, false); // Space commits candidate 0
+            CHECK(eCommit.consumed && eCommit.commitText == "alice@example.com");
+
+            // 3) https://example.com + Backspace past trigger exits urlMode_
+            sendSeq("https://example.com");
+            auto hItems = urlEng.currentPageItems();
+            CHECK(!hItems.empty() && hItems[0].text == "https://example.com");
+            auto hCommit = urlEng.handleKey(0x0D, 0, false);
+            CHECK(hCommit.consumed && hCommit.commitText == "https://example.com");
+
+            sendSeq("alice@b");
+            urlEng.handleKey(0x08, 0, false); // drop 'b' -> "alice@" (still URL mode)
+            CHECK(!urlEng.currentPageItems().empty() && urlEng.currentPageItems()[0].text == "alice@");
+            urlEng.handleKey(0x08, 0, false); // drop '@' -> "alice" (exits URL mode -> back to Pinyin/EN)
+            CHECK(urlEng.currentPageItems().empty() || urlEng.currentPageItems()[0].comment != "[URL]");
+            urlEng.handleKey(0x1B, 0, false);
+        }
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

@@ -182,7 +182,9 @@ struct HostApp {
                 dict = std::move(newMain);
             }
             engine.setDictionary(dict.get());
-            engine.userDict().load(userDictPath);
+            if (engine.userDict().saveIfDirty()) {
+                engine.userDict().load(userDictPath);
+            }
             liteime::engine::UserDict::loadConfig(engine.userDict().configPath(), engine.config());
         }
         reloadExtraDictionaries();

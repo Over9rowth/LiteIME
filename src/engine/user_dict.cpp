@@ -180,16 +180,18 @@ bool UserDict::removeEntry(std::string_view pinyinKey, std::string_view word) {
     auto it = entries_.find(std::string(pinyinKey));
     if (it == entries_.end()) return false;
     auto& vec = it->second;
-    auto origSize = vec.size();
+    const size_t origSize = vec.size();
     vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const UserEntry& e) {
         return e.word == word;
     }), vec.end());
-    if (vec.empty()) entries_.erase(it);
-    if (vec.size() != origSize) {
-        dirty_ = true;
-        return true;
+    const bool changed = (vec.size() != origSize);
+    if (vec.empty()) {
+        entries_.erase(it);
     }
-    return false;
+    if (changed) {
+        dirty_ = true;
+    }
+    return changed;
 }
 
 std::vector<UserEntry> UserDict::lookup(std::string_view pinyinKey) const {
@@ -318,8 +320,11 @@ bool UserDict::unpin(std::string_view rawKey, std::string_view word) {
     vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const PinnedEntry& p) {
         return p.word == word;
     }), vec.end());
-    if (vec.empty()) pins_.erase(it);
-    return vec.size() != before || pins_.find(key) == pins_.end();
+    const bool changed = (vec.size() != before);
+    if (vec.empty()) {
+        pins_.erase(it);
+    }
+    return changed;
 }
 
 int UserDict::getPinnedSlot(std::string_view rawKey, std::string_view word) const {

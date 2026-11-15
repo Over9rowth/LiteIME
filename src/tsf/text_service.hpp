@@ -58,6 +58,7 @@ public:
     // Composition helpers used by edit sessions
     HRESULT applyResponseInSession(TfEditCookie ec, ITfContext* pContext, const ipc::Response& resp);
     HRESULT queryCaretInSession(TfEditCookie ec, ITfContext* pContext, RECT* outRect, BOOL* outFound);
+    void sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t hwndVal);
     void clearCompositionRef();
 
 private:

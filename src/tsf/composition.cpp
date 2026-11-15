@@ -44,26 +44,6 @@ protected:
     ITfContext* ctx_;
 };
 
-class CApplyResponseSession final : public CEditSessionBase {
-public:
-    CApplyResponseSession(CTextService* svc, ITfContext* ctx, const ipc::Response& resp,
-                          RECT* postRc = nullptr, BOOL* postFound = nullptr)
-        : CEditSessionBase(svc, ctx), resp_(resp), postRc_(postRc), postFound_(postFound) {}
-
-    STDMETHODIMP DoEditSession(TfEditCookie ec) override {
-        HRESULT hr = svc_->applyResponseInSession(ec, ctx_, resp_);
-        if (SUCCEEDED(hr) && resp_.preeditLen > 0 && postRc_ && postFound_) {
-            svc_->queryCaretInSession(ec, ctx_, postRc_, postFound_);
-        }
-        return hr;
-    }
-
-private:
-    ipc::Response resp_;
-    RECT* postRc_;
-    BOOL* postFound_;
-};
-
 class ScopedPerMonitorDpi {
 public:
     ScopedPerMonitorDpi() {
@@ -84,8 +64,46 @@ public:
     }
 
 private:
-    HANDLE(WINAPI* setFn_)(HANDLE) = nullptr;
+    using FnSetThreadDpi = HANDLE(WINAPI*)(HANDLE);
+    FnSetThreadDpi setFn_ = nullptr;
     HANDLE prev_ = nullptr;
+};
+
+class CApplyResponseSession final : public CEditSessionBase {
+public:
+    CApplyResponseSession(CTextService* svc, ITfContext* ctx, const ipc::Response& resp,
+                          bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal)
+        : CEditSessionBase(svc, ctx),
+          resp_(resp),
+          hasPreCaret_(hasPreCaret),
+          preCaretX_(preCaretX),
+          preCaretY_(preCaretY),
+          hwndVal_(hwndVal) {}
+
+    STDMETHODIMP DoEditSession(TfEditCookie ec) override {
+        ScopedPerMonitorDpi dpiGuard;
+        HRESULT hr = svc_->applyResponseInSession(ec, ctx_, resp_);
+        if (SUCCEEDED(hr) && resp_.preeditLen > 0) {
+            RECT postRc{};
+            BOOL postFound = FALSE;
+            if (SUCCEEDED(svc_->queryCaretInSession(ec, ctx_, &postRc, &postFound)) && postFound) {
+                const int newX = static_cast<int>(postRc.left);
+                const int newY = static_cast<int>(postRc.bottom);
+                const int newH = (postRc.bottom > postRc.top) ? static_cast<int>(postRc.bottom - postRc.top) : 20;
+                if (!hasPreCaret_ || std::abs(newX - preCaretX_) > 2 || std::abs(newY - preCaretY_) > 2) {
+                    svc_->sendCaretUpdate(newX, newY, newH, hwndVal_);
+                }
+            }
+        }
+        return hr;
+    }
+
+private:
+    ipc::Response resp_;
+    bool hasPreCaret_ = false;
+    int preCaretX_ = 0;
+    int preCaretY_ = 0;
+    uint64_t hwndVal_ = 0;
 };
 
 class CCaretQuerySession final : public CEditSessionBase {
@@ -303,37 +321,32 @@ HRESULT CTextService::applyResponseInSession(TfEditCookie ec, ITfContext* pConte
     return S_OK;
 }
 
+void CTextService::sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t hwndVal) {
+    ipc::Request upd{};
+    upd.type = ipc::MsgType::UpdateCaret;
+    upd.hasCaret = 1;
+    upd.caretX = caretX;
+    upd.caretY = caretY;
+    upd.caretHeight = caretH;
+    upd.hwnd = hwndVal;
+    ipc::Response updResp{};
+    pipe_.sendRequest(upd, updResp);
+}
+
 void CTextService::applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
                                       bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal) {
     if (!pic || clientId_ == TF_CLIENTID_NULL) return;
     const bool hasTextChange = (resp.commitLen > 0 || resp.preeditLen > 0 || isComposing_);
     if (!hasTextChange) return;
 
-    RECT postRc{};
-    BOOL postFound = FALSE;
-    {
-        ScopedPerMonitorDpi dpiGuard;
-        auto* sess = new CApplyResponseSession(this, pic, resp, &postRc, &postFound);
-        HRESULT hrSession = S_OK;
-        pic->RequestEditSession(clientId_, sess, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
-        sess->Release();
+    auto* sess = new CApplyResponseSession(this, pic, resp, hasPreCaret, preCaretX, preCaretY, hwndVal);
+    HRESULT hrSession = S_OK;
+    const HRESULT hrReq = pic->RequestEditSession(
+        clientId_, sess, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
+    if (FAILED(hrReq) || (hrReq == S_OK && FAILED(hrSession))) {
+        clearCompositionRef();
     }
-    if (postFound && resp.preeditLen > 0) {
-        int newX = static_cast<int>(postRc.left);
-        int newY = static_cast<int>(postRc.bottom);
-        int newH = (postRc.bottom > postRc.top) ? static_cast<int>(postRc.bottom - postRc.top) : 20;
-        if (!hasPreCaret || std::abs(newX - preCaretX) > 2 || std::abs(newY - preCaretY) > 2) {
-            ipc::Request upd{};
-            upd.type = ipc::MsgType::UpdateCaret;
-            upd.hasCaret = 1;
-            upd.caretX = newX;
-            upd.caretY = newY;
-            upd.caretHeight = newH;
-            upd.hwnd = hwndVal;
-            ipc::Response updResp{};
-            pipe_.sendRequest(upd, updResp);
-        }
-    }
+    sess->Release();
 }
 
 HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM lParam,

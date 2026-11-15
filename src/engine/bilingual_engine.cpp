@@ -570,7 +570,8 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
                 return finalizeCommit(committedPrefixWords_ + rawBuffer_ + ch);
             }
             char ch = static_cast<char>(shift ? vk : (vk - 'A' + 'a'));
-            if (rawBuffer_.size() < 64) {
+            const size_t maxBuf = urlMode_ ? 128 : 64;
+            if (rawBuffer_.size() < maxBuf) {
                 rawBuffer_.push_back(ch);
                 if (config_.autoUrlEnglish && isUrlTrigger(detail::toLowerAscii(rawBuffer_))) {
                     urlMode_ = true;
@@ -578,6 +579,25 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
                 rebuildCandidates();
             }
             return buildComposeResult();
+        }
+
+        // Trigger URL/email mode cleanly when '.' completes "www." or '@' follows a local-part prefix
+        if (!urlMode_ && config_.autoUrlEnglish && !rawBuffer_.empty()) {
+            if (!shift && vk == kVkOemPeriod &&
+                isUrlTrigger(detail::toLowerAscii(rawBuffer_) + '.')) {
+                if (testOnly) { res.consumed = true; return res; }
+                urlMode_ = true;
+                rawBuffer_.push_back('.');
+                rebuildCandidates();
+                return buildComposeResult();
+            }
+            if (shift && vk == '2') { // '@'
+                if (testOnly) { res.consumed = true; return res; }
+                urlMode_ = true;
+                rawBuffer_.push_back('@');
+                rebuildCandidates();
+                return buildComposeResult();
+            }
         }
 
         // Apostrophe separator (e.g. xi'an, dan'g) or URL chars in urlMode_
@@ -590,25 +610,29 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             return buildComposeResult();
         }
 
-        if (urlMode_ && !shift &&
-            (vk == kVkOemPeriod || vk == kVkOem2 || vk == kVkOemMinus || (vk >= '0' && vk <= '9'))) {
-            if (testOnly) { res.consumed = true; return res; }
-            char ch = (vk == kVkOemPeriod) ? '.' : (vk == kVkOem2 ? '/' : (vk == kVkOemMinus ? '-' : static_cast<char>(vk)));
-            rawBuffer_.push_back(ch);
-            rebuildCandidates();
-            return buildComposeResult();
-        }
-        if (urlMode_ && shift && vk == '2') { // '@'
-            if (testOnly) { res.consumed = true; return res; }
-            rawBuffer_.push_back('@');
-            rebuildCandidates();
-            return buildComposeResult();
-        }
-        if (urlMode_ && shift && vk == kVkOem1) { // ':'
-            if (testOnly) { res.consumed = true; return res; }
-            rawBuffer_.push_back(':');
-            rebuildCandidates();
-            return buildComposeResult();
+        if (urlMode_ && rawBuffer_.size() < 128) {
+            char urlCh = '\0';
+            char npDigit = digitFromVk(vk, shift);
+            if (npDigit != '\0') {
+                urlCh = npDigit;
+            } else if (!shift) {
+                if (vk == kVkOemPeriod) urlCh = '.';
+                else if (vk == kVkOem2) urlCh = '/';
+                else if (vk == kVkOemMinus) urlCh = '-';
+                else if (vk == kVkOemPlus) urlCh = '=';
+            } else {
+                if (vk == '2') urlCh = '@';
+                else if (vk == kVkOem1) urlCh = ':';
+                else if (vk == kVkOemMinus) urlCh = '_';
+                else if (vk == kVkOem2) urlCh = '?';
+                else if (vk == '7') urlCh = '&';
+            }
+            if (urlCh != '\0') {
+                if (testOnly) { res.consumed = true; return res; }
+                rawBuffer_.push_back(urlCh);
+                rebuildCandidates();
+                return buildComposeResult();
+            }
         }
 
         // Backspace
