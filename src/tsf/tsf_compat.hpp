@@ -20,6 +20,24 @@ EXTERN_C const GUID GUID_TFCAT_TIPCAP_TSF3;
 
 EXTERN_C const IID IID_ITfTextInputProcessorEx;
 EXTERN_C const IID IID_ITfDisplayAttributeProvider;
+EXTERN_C const IID IID_ITfTextLayoutSink;
+
+#ifndef __ITfTextLayoutSink_INTERFACE_DEFINED__
+#define __ITfTextLayoutSink_INTERFACE_DEFINED__
+typedef enum {
+    TF_LC_CREATE = 0,
+    TF_LC_CHANGE = 1,
+    TF_LC_DESTROY = 2
+} TfLayoutCode;
+
+struct ITfTextLayoutSink : public IUnknown {
+public:
+    virtual HRESULT STDMETHODCALLTYPE OnLayoutChange(
+        ITfContext* pic,
+        TfLayoutCode lcode,
+        ITfContextView* pView) = 0;
+};
+#endif
 
 #ifndef TF_CLIENTID_NULL
 #define TF_CLIENTID_NULL ((TfClientId)0)
@@ -146,5 +164,29 @@ void DllAddRef();
 void DllRelease();
 
 namespace liteime::tsf {
+class ScopedPerMonitorDpi {
+public:
+    ScopedPerMonitorDpi() {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (!user32) return;
+        using FnSetThreadDpi = HANDLE(WINAPI*)(HANDLE);
+        setFn_ = reinterpret_cast<FnSetThreadDpi>(
+            reinterpret_cast<void*>(GetProcAddress(user32, "SetThreadDpiAwarenessContext")));
+        if (setFn_) {
+            prev_ = setFn_(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)));
+        }
+    }
+    ~ScopedPerMonitorDpi() {
+        if (setFn_ && prev_) {
+            setFn_(prev_);
+        }
+    }
+
+private:
+    using FnSetThreadDpi = HANDLE(WINAPI*)(HANDLE);
+    FnSetThreadDpi setFn_ = nullptr;
+    HANDLE prev_ = nullptr;
+};
+
 HRESULT CreateTextServiceInstance(IUnknown* pUnkOuter, REFIID riid, void** ppvObj);
 }

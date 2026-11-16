@@ -56,6 +56,7 @@ struct HostApp {
     uint32_t activeClientPid = 0;
     uint64_t activeTargetHwnd = 0;
     bool imeActive = false;
+    bool clientRendersInProc = false;
     bool shouldShowCandidates = false;
     bool forceStatusRedraw = false;
     bool statusShown = false;
@@ -260,7 +261,8 @@ struct HostApp {
             activeSnap = imeActive;
             forceStatusSnap = std::exchange(forceStatusRedraw, false);
             cfgSnap = engine.config();
-            showCand = imeActive && shouldShowCandidates && engine.isComposing() && !engine.allCandidates().empty();
+            showCand = !clientRendersInProc && imeActive && shouldShowCandidates &&
+                       engine.isComposing() && !engine.allCandidates().empty();
             if (showCand) {
                 vs.visible = true;
                 vs.headerBuffer = engine.formattedHeader();
@@ -293,6 +295,7 @@ struct HostApp {
             std::lock_guard<std::mutex> lock(stateMutex);
             if (connId != 0 && connId == activeConnId) {
                 imeActive = false;
+                clientRendersInProc = false;
                 activeConnId = 0;
                 activeClientPid = 0;
                 activeTargetHwnd = 0;
@@ -345,6 +348,38 @@ struct HostApp {
         }
     }
 
+    void fillOverlayIntoResponse(bool showCand, liteime::ipc::Response& resp) const {
+        const auto& cfgSnap = engine.config();
+        resp.showCandidates = showCand ? 1 : 0;
+        resp.skin = static_cast<uint8_t>(cfgSnap.skin);
+        resp.layout = static_cast<uint8_t>(cfgSnap.layout);
+        resp.squareFrame = cfgSnap.squareFrame ? 1 : 0;
+        resp.selectedIndex = 0;
+        resp.candCount = 0;
+        resp.page = 0;
+        resp.totalPages = 0;
+        resp.headerLen = 0;
+        if (!showCand) return;
+
+        const std::string hdr = engine.formattedHeader();
+        resp.headerLen = static_cast<uint16_t>(liteime::copyUtf8Bounded(hdr, resp.header, sizeof(resp.header)));
+        const auto pageItems = engine.currentPageItems();
+        const size_t n = std::min<size_t>(pageItems.size(), liteime::ipc::kMaxOverlayCandidates);
+        resp.candCount = static_cast<uint8_t>(n);
+        resp.selectedIndex = static_cast<uint8_t>(
+            std::clamp<int>(engine.selectedIndexInPage(), 0, n > 0 ? static_cast<int>(n) - 1 : 0));
+        resp.page = static_cast<uint16_t>(engine.currentPage());
+        resp.totalPages = static_cast<uint16_t>(engine.totalPages());
+        for (size_t i = 0; i < n; ++i) {
+            auto& dst = resp.candidates[i];
+            const auto& src = pageItems[i];
+            dst.textLen = static_cast<uint8_t>(liteime::copyUtf8Bounded(src.text, dst.text, sizeof(dst.text)));
+            dst.commentLen = static_cast<uint8_t>(liteime::copyUtf8Bounded(src.comment, dst.comment, sizeof(dst.comment)));
+            dst.pinnedSlot = (src.pinnedSlot >= 0 && src.pinnedSlot <= 8) ? static_cast<int8_t>(src.pinnedSlot) : -1;
+            dst.reserved = 0;
+        }
+    }
+
     void pushNotifyResponse(uint32_t targetPid, uint64_t targetHwnd, const liteime::ipc::Response& resp) {
         if (targetPid == 0) return;
         liteime::ipc::NotifyPacket pkt{};
@@ -377,6 +412,7 @@ struct HostApp {
                     activeClientPid = clientPid;
                     if (req.hwnd != 0) activeTargetHwnd = req.hwnd;
                     imeActive = true;
+                    clientRendersInProc = (req.reserved & liteime::ipc::ReqFlagInProcUi) != 0;
                     if (req.hasCaret != 0) {
                         lastCaretX = req.caretX;
                         lastCaretY = req.caretY;
@@ -390,6 +426,38 @@ struct HostApp {
                                            (act.showCandidates || (req.isKeyUp != 0 && !act.consumed));
                     openQuickDlg = act.openQuickInputDialog;
                     needUi = true;
+                    fillOverlayIntoResponse(shouldShowCandidates, resp);
+                    break;
+                case liteime::ipc::MsgType::SelectCandidate:
+                    activeConnId = connId;
+                    activeClientPid = clientPid;
+                    if (req.hwnd != 0) activeTargetHwnd = req.hwnd;
+                    imeActive = true;
+                    clientRendersInProc = (req.reserved & liteime::ipc::ReqFlagInProcUi) != 0;
+                    if (engine.isComposing()) {
+                        act = engine.selectCandidateOnPage(static_cast<int>(req.vk));
+                        if (act.isQuickInput && !isForegroundQuickInputAuthorized(clientPid, req.hwnd)) {
+                            act.commitText.clear();
+                        }
+                        shouldShowCandidates = engine.isComposing() && !engine.allCandidates().empty() && act.showCandidates;
+                        openQuickDlg = act.openQuickInputDialog;
+                        needUi = true;
+                    }
+                    fillOverlayIntoResponse(shouldShowCandidates, resp);
+                    break;
+                case liteime::ipc::MsgType::PrevPage:
+                case liteime::ipc::MsgType::NextPage:
+                    activeConnId = connId;
+                    activeClientPid = clientPid;
+                    if (req.hwnd != 0) activeTargetHwnd = req.hwnd;
+                    imeActive = true;
+                    clientRendersInProc = (req.reserved & liteime::ipc::ReqFlagInProcUi) != 0;
+                    if (engine.isComposing()) {
+                        act = (req.type == liteime::ipc::MsgType::NextPage) ? engine.nextPage() : engine.prevPage();
+                        shouldShowCandidates = engine.isComposing() && !engine.allCandidates().empty() && act.showCandidates;
+                        needUi = true;
+                    }
+                    fillOverlayIntoResponse(shouldShowCandidates, resp);
                     break;
                 case liteime::ipc::MsgType::FocusChanged:
                     if (req.focusGained != 0) {
@@ -397,11 +465,13 @@ struct HostApp {
                         activeClientPid = clientPid;
                         activeTargetHwnd = req.hwnd;
                         imeActive = true;
+                        clientRendersInProc = (req.reserved & liteime::ipc::ReqFlagInProcUi) != 0;
                         engine.notifyFocusChanged(true);
                         shouldShowCandidates = false;
                         needUi = true;
                     } else if (activeConnId == 0 || connId == activeConnId) {
                         imeActive = false;
+                        clientRendersInProc = false;
                         activeConnId = 0;
                         activeClientPid = 0;
                         activeTargetHwnd = 0;

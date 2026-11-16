@@ -290,6 +290,32 @@ def main() -> int:
         assert m_v1 == MAGIC and v_v1 == 1 and c_v1 == 1
         send_ipc(pipe, 2, 0x1B, 0, 0)
 
+        # 9d. v3 protocol + ReqFlagInProcUi (in-process candidate overlay for elevated Z-band hosts like SearchHost)
+        resp_v3_fmt = "<IHBBBBBBHHH512s4096sBBBBBBHHH128s" + ("64s32sBBbB" * 8)
+        assert struct.calcsize(resp_v3_fmt) == 5566
+        def send_v3(msg_type: int, vk: int = 0):
+            req_v3 = struct.pack(REQ_FMT, MAGIC, 3, msg_type, vk, 0, 0, 0, 1, 1, 1, 320, 320, 22, 0)
+            buf = ctypes.create_string_buffer(struct.calcsize(resp_v3_fmt))
+            br = wt.DWORD()
+            assert kernel32.TransactNamedPipe(pipe, req_v3, len(req_v3), buf, len(buf), ctypes.byref(br), None)
+            assert br.value == 5566, f"Expected 5566B Response v3, got {br.value}"
+            return struct.unpack(resp_v3_fmt, buf.raw)
+        for ch in "SAD":
+            v3_u = send_v3(2, ord(ch))
+        assert v3_u[13] == 1 and v3_u[15] >= 1, f"Expected v3 showCandidates=1 with items, got {v3_u[13:20]}"
+        hdr_len = v3_u[21]
+        hdr_str = v3_u[22][:hdr_len].decode("utf-8")
+        assert hdr_str == "sa'd", f"Expected header sa'd, got {hdr_str!r}"
+        assert wait_visible(cand_hwnd, False), "Host CandidateWindow should stay hidden when ReqFlagInProcUi is active"
+        # NextPage (9), PrevPage (8), SelectCandidate (7)
+        v3_next = send_v3(9, 0)
+        assert v3_next[13] == 1 and v3_next[19] >= 1
+        v3_prev = send_v3(8, 0)
+        assert v3_prev[19] == 0
+        v3_sel = send_v3(7, 0)
+        assert v3_sel[2] == 1 and v3_sel[9] > 0, f"SelectCandidate must commit non-empty UTF-8: {v3_sel[:11]}"
+        send_ipc(pipe, 3, focus=1)  # Restore normal desktop UI flag before section 10
+
         # 10. Modal UI non-blocking & multi-client IPC concurrency regression test:
         # Open QuickInput manager / modal warning via "vvv" -> '2' (QuickInputSetup slot), then slam IPC from 4 worker threads.
         for ch in "VVV":

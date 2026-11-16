@@ -44,31 +44,6 @@ protected:
     ITfContext* ctx_;
 };
 
-class ScopedPerMonitorDpi {
-public:
-    ScopedPerMonitorDpi() {
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        if (!user32) return;
-        using FnSetThreadDpi = HANDLE(WINAPI*)(HANDLE);
-        setFn_ = reinterpret_cast<FnSetThreadDpi>(
-            reinterpret_cast<void*>(GetProcAddress(user32, "SetThreadDpiAwarenessContext")));
-        if (setFn_) {
-            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == ((DPI_AWARENESS_CONTEXT)-4)
-            prev_ = setFn_(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)));
-        }
-    }
-    ~ScopedPerMonitorDpi() {
-        if (setFn_ && prev_) {
-            setFn_(prev_);
-        }
-    }
-
-private:
-    using FnSetThreadDpi = HANDLE(WINAPI*)(HANDLE);
-    FnSetThreadDpi setFn_ = nullptr;
-    HANDLE prev_ = nullptr;
-};
-
 class CApplyResponseSession final : public CEditSessionBase {
 public:
     CApplyResponseSession(CTextService* svc, ITfContext* ctx, const ipc::Response& resp,
@@ -124,6 +99,26 @@ public:
 private:
     RECT* rc_;
     BOOL* found_;
+};
+
+class CRefreshCaretSession final : public CEditSessionBase {
+public:
+    CRefreshCaretSession(CTextService* svc, ITfContext* ctx, uint64_t hwndVal)
+        : CEditSessionBase(svc, ctx), hwndVal_(hwndVal) {}
+
+    STDMETHODIMP DoEditSession(TfEditCookie ec) override {
+        ScopedPerMonitorDpi dpiGuard;
+        RECT rc{};
+        BOOL found = FALSE;
+        if (SUCCEEDED(svc_->queryCaretInSession(ec, ctx_, &rc, &found)) && found) {
+            const int h = (rc.bottom > rc.top) ? static_cast<int>(rc.bottom - rc.top) : 20;
+            svc_->sendCaretUpdate(static_cast<int>(rc.left), static_cast<int>(rc.bottom), h, hwndVal_);
+        }
+        return S_OK;
+    }
+
+private:
+    uint64_t hwndVal_ = 0;
 };
 
 void setRangeDisplayAttr(TfEditCookie ec, ITfContext* ctx, ITfRange* range, TfGuidAtom atom) {
@@ -236,6 +231,20 @@ void CTextService::fillCaretPos(ITfContext* pic, ipc::Request& req) {
         req.caretX = pt.x;
         req.caretY = pt.y;
         req.caretHeight = (gti.rcCaret.bottom > gti.rcCaret.top) ? (gti.rcCaret.bottom - gti.rcCaret.top) : 20;
+        return;
+    }
+
+    // Fallback when neither GetTextExt nor Win32 caret is ready yet (e.g. XAML TextBox first key)
+    if (!lastCaretValid_) {
+        HWND targetWin = req.hwnd ? reinterpret_cast<HWND>(static_cast<uintptr_t>(req.hwnd)) : GetFocus();
+        if (!targetWin || !IsWindow(targetWin)) targetWin = GetForegroundWindow();
+        RECT wrc{};
+        if (targetWin && IsWindow(targetWin) && GetWindowRect(targetWin, &wrc)) {
+            req.hasCaret = 1;
+            req.caretX = static_cast<int>(wrc.left) + 48;
+            req.caretY = std::min<int>(static_cast<int>(wrc.top) + 84, static_cast<int>(wrc.bottom) - 16);
+            req.caretHeight = 22;
+        }
     }
 }
 
@@ -328,6 +337,14 @@ HRESULT CTextService::applyResponseInSession(TfEditCookie ec, ITfContext* pConte
 }
 
 void CTextService::sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t hwndVal) {
+    lastCaretValid_ = true;
+    lastCaretX_ = caretX;
+    lastCaretY_ = caretY;
+    lastCaretH_ = caretH;
+    if (inProcCand_.isVisible()) {
+        inProcCand_.moveCaret(caretX, caretY, caretH);
+    }
+
     ipc::Request upd{};
     upd.type = ipc::MsgType::UpdateCaret;
     upd.hasCaret = 1;
@@ -337,6 +354,126 @@ void CTextService::sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t 
     upd.hwnd = hwndVal;
     ipc::Response updResp{};
     pipe_.sendRequest(upd, updResp);
+}
+
+STDMETHODIMP CTextService::OnLayoutChange(ITfContext* pic, TfLayoutCode lcode, ITfContextView*) {
+    if (!isComposing_ || !pic || clientId_ == TF_CLIENTID_NULL) return S_OK;
+    if (lcode != TF_LC_CREATE && lcode != TF_LC_CHANGE) return S_OK;
+    auto* sess = new CRefreshCaretSession(this, pic, activeHwnd_);
+    HRESULT hrSession = S_OK;
+    pic->RequestEditSession(clientId_, sess, TF_ES_ASYNCDONTCARE | TF_ES_READ, &hrSession);
+    sess->Release();
+    return S_OK;
+}
+
+bool CTextService::shouldUseInProcessOverlay(uint64_t focusHwnd) const {
+    auto isElevatedBand = [](HWND h) -> bool {
+        if (!h || !IsWindow(h)) return false;
+        HWND root = GetAncestor(h, GA_ROOT);
+        if (!root || !IsWindow(root)) root = h;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (!user32) return false;
+        using FnGetWindowBand = BOOL(WINAPI*)(HWND, DWORD*);
+        auto fn = reinterpret_cast<FnGetWindowBand>(
+            reinterpret_cast<void*>(GetProcAddress(user32, "GetWindowBand")));
+        if (!fn) return false;
+        DWORD band = 0;
+        return fn(root, &band) && band > 1; // 1 == ZBID_DESKTOP
+    };
+
+    if (focusHwnd != 0 && isElevatedBand(reinterpret_cast<HWND>(static_cast<uintptr_t>(focusHwnd)))) {
+        return true;
+    }
+    HWND fg = GetForegroundWindow();
+    DWORD fgPid = 0;
+    if (fg && GetWindowThreadProcessId(fg, &fgPid) && fgPid == GetCurrentProcessId() && isElevatedBand(fg)) {
+        return true;
+    }
+
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD n = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (n > 0) {
+        const wchar_t* base = exePath;
+        for (DWORD i = 0; i < n; ++i) {
+            if (exePath[i] == L'\\' || exePath[i] == L'/') base = exePath + i + 1;
+        }
+        static const wchar_t* const kElevatedShellHosts[] = {
+            L"SearchHost.exe",
+            L"SearchApp.exe",
+            L"SearchUI.exe",
+            L"StartMenuExperienceHost.exe",
+            L"ShellExperienceHost.exe",
+            L"LockApp.exe",
+        };
+        for (const wchar_t* name : kElevatedShellHosts) {
+            if (_wcsicmp(base, name) == 0) return true;
+        }
+    }
+    return false;
+}
+
+void CTextService::syncOverlayFromResponse(const ipc::Response& resp,
+                                           int caretX, int caretY, int caretH,
+                                           uint64_t hwndVal, bool inProcUi) {
+    if (!inProcUi || resp.showCandidates == 0 || resp.candCount == 0) {
+        inProcCand_.hide();
+        return;
+    }
+    inProcCand_.update(
+        resp, caretX, caretY, caretH, hwndVal,
+        [this](int idx) { handleOverlaySelect(idx); },
+        [this](bool next) { handleOverlayPage(next); });
+}
+
+void CTextService::handleOverlaySelect(int slotIdx) {
+    if (!threadMgr_) return;
+    ipc::Request req{};
+    req.type = ipc::MsgType::SelectCandidate;
+    req.vk = static_cast<uint32_t>(slotIdx);
+    req.hwnd = activeHwnd_ ? activeHwnd_ : reinterpret_cast<uint64_t>(GetFocus());
+    req.reserved |= ipc::ReqFlagInProcUi;
+
+    ipc::Response resp{};
+    if (!pipe_.sendRequest(req, resp)) return;
+
+    syncOverlayFromResponse(resp, lastCaretX_, lastCaretY_, lastCaretH_, req.hwnd, true);
+    ITfDocumentMgr* pdim = nullptr;
+    ITfContext* pic = nullptr;
+    if (SUCCEEDED(threadMgr_->GetFocus(&pdim)) && pdim) {
+        pdim->GetTop(&pic);
+        pdim->Release();
+    }
+    if (pic) {
+        if (resp.consumed || (isComposing_ && !resp.isComposing)) {
+            applyResponseAsync(pic, resp, lastCaretValid_, lastCaretX_, lastCaretY_, req.hwnd, true);
+        }
+        pic->Release();
+    }
+}
+
+void CTextService::handleOverlayPage(bool isNext) {
+    if (!threadMgr_) return;
+    ipc::Request req{};
+    req.type = isNext ? ipc::MsgType::NextPage : ipc::MsgType::PrevPage;
+    req.hwnd = activeHwnd_ ? activeHwnd_ : reinterpret_cast<uint64_t>(GetFocus());
+    req.reserved |= ipc::ReqFlagInProcUi;
+
+    ipc::Response resp{};
+    if (!pipe_.sendRequest(req, resp)) return;
+
+    syncOverlayFromResponse(resp, lastCaretX_, lastCaretY_, lastCaretH_, req.hwnd, true);
+    ITfDocumentMgr* pdim = nullptr;
+    ITfContext* pic = nullptr;
+    if (SUCCEEDED(threadMgr_->GetFocus(&pdim)) && pdim) {
+        pdim->GetTop(&pic);
+        pdim->Release();
+    }
+    if (pic) {
+        if (resp.consumed && resp.preeditLen > 0) {
+            applyResponseAsync(pic, resp, lastCaretValid_, lastCaretX_, lastCaretY_, req.hwnd, true);
+        }
+        pic->Release();
+    }
 }
 
 void CTextService::applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
@@ -367,8 +504,15 @@ HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM l
     req.modifiers = currentModifiers();
     req.isKeyUp = isKeyUp ? 1 : 0;
     req.hwnd = reinterpret_cast<uint64_t>(GetFocus());
+    const bool useInProc = !testOnly && shouldUseInProcessOverlay(req.hwnd);
+    if (useInProc) {
+        req.reserved |= ipc::ReqFlagInProcUi;
+    }
+
     if (!testOnly && req.hwnd != 0) {
         if (activeHwnd_ != 0 && activeHwnd_ != req.hwnd) {
+            lastCaretValid_ = false;
+            inProcCand_.hide();
             std::lock_guard<std::mutex> lock(notifyMutex_);
             pendingNotifies_.clear();
         }
@@ -378,6 +522,12 @@ HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM l
 
     if (!testOnly && !isKeyUp) {
         fillCaretPos(pic, req);
+        if (req.hasCaret != 0) {
+            lastCaretValid_ = true;
+            lastCaretX_ = req.caretX;
+            lastCaretY_ = req.caretY;
+            lastCaretH_ = req.caretHeight;
+        }
     }
 
     ipc::Response resp{};
@@ -387,6 +537,13 @@ HRESULT CTextService::handleKeyInternal(ITfContext* pic, WPARAM wParam, LPARAM l
 
     if (pfEaten) {
         *pfEaten = resp.consumed ? TRUE : FALSE;
+    }
+
+    if (!testOnly) {
+        const int cx = (req.hasCaret != 0) ? req.caretX : lastCaretX_;
+        const int cy = (req.hasCaret != 0) ? req.caretY : lastCaretY_;
+        const int ch = (req.hasCaret != 0) ? req.caretHeight : lastCaretH_;
+        syncOverlayFromResponse(resp, cx, cy, ch, req.hwnd, useInProc);
     }
 
     // Apply edits when key was consumed OR when host silently left composing state while TSF still shows inline preedit.

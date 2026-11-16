@@ -15,6 +15,7 @@ CTextService::CTextService() {
 CTextService::~CTextService() {
     pipe_.stopNotify();
     uninitNotifyWindow();
+    inProcCand_.destroy();
     clearCompositionRef();
     uninitKeyEventSink();
     uninitThreadMgrSink();
@@ -38,6 +39,8 @@ STDMETHODIMP CTextService::QueryInterface(REFIID riid, void** ppvObj) {
         *ppvObj = static_cast<ITfThreadMgrEventSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfTextEditSink)) {
         *ppvObj = static_cast<ITfTextEditSink*>(this);
+    } else if (IsEqualIID(riid, IID_ITfTextLayoutSink)) {
+        *ppvObj = static_cast<ITfTextLayoutSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfKeyEventSink)) {
         *ppvObj = static_cast<ITfKeyEventSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfCompositionSink)) {
@@ -119,7 +122,9 @@ STDMETHODIMP CTextService::Deactivate() {
     pipe_.sendRequest(req, resp);
 
     activeHwnd_ = 0;
+    lastCaretValid_ = false;
     pipe_.setNotifyHwnd(0);
+    inProcCand_.destroy();
     {
         std::lock_guard<std::mutex> lock(notifyMutex_);
         pendingNotifies_.clear();
@@ -309,13 +314,19 @@ void CTextService::uninitKeyEventSink() {
 
 void CTextService::updateTextEditSink(ITfDocumentMgr* pdim) {
     if (textEditContext_) {
-        if (textEditCookie_ != TF_INVALID_COOKIE) {
+        if (textEditCookie_ != TF_INVALID_COOKIE || textLayoutCookie_ != TF_INVALID_COOKIE) {
             ITfSource* pSource = nullptr;
             if (SUCCEEDED(textEditContext_->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&pSource))) && pSource) {
-                pSource->UnadviseSink(textEditCookie_);
+                if (textEditCookie_ != TF_INVALID_COOKIE) {
+                    pSource->UnadviseSink(textEditCookie_);
+                    textEditCookie_ = TF_INVALID_COOKIE;
+                }
+                if (textLayoutCookie_ != TF_INVALID_COOKIE) {
+                    pSource->UnadviseSink(textLayoutCookie_);
+                    textLayoutCookie_ = TF_INVALID_COOKIE;
+                }
                 pSource->Release();
             }
-            textEditCookie_ = TF_INVALID_COOKIE;
         }
         textEditContext_->Release();
         textEditContext_ = nullptr;
@@ -329,6 +340,7 @@ void CTextService::updateTextEditSink(ITfDocumentMgr* pdim) {
             if (SUCCEEDED(pSource->AdviseSink(IID_ITfTextEditSink, static_cast<ITfTextEditSink*>(this), &textEditCookie_))) {
                 textEditContext_ = pCtx;
                 textEditContext_->AddRef();
+                pSource->AdviseSink(IID_ITfTextLayoutSink, static_cast<ITfTextLayoutSink*>(this), &textLayoutCookie_);
             }
             pSource->Release();
         }
@@ -346,13 +358,17 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus, ITfDocumentMgr*
     const uint64_t focusHwnd = reinterpret_cast<uint64_t>(GetFocus());
     if (!pdimFocus) {
         activeHwnd_ = 0;
+        lastCaretValid_ = false;
         pipe_.setNotifyHwnd(0);
+        inProcCand_.hide();
         {
             std::lock_guard<std::mutex> lock(notifyMutex_);
             pendingNotifies_.clear();
         }
     } else {
         if (focusHwnd != activeHwnd_) {
+            lastCaretValid_ = false;
+            inProcCand_.hide();
             std::lock_guard<std::mutex> lock(notifyMutex_);
             pendingNotifies_.clear();
         }
@@ -364,6 +380,9 @@ STDMETHODIMP CTextService::OnSetFocus(ITfDocumentMgr* pdimFocus, ITfDocumentMgr*
     req.type = ipc::MsgType::FocusChanged;
     req.focusGained = (pdimFocus != nullptr) ? 1 : 0;
     req.hwnd = focusHwnd;
+    if (pdimFocus != nullptr && shouldUseInProcessOverlay(focusHwnd)) {
+        req.reserved |= ipc::ReqFlagInProcUi;
+    }
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
     if (!pdimFocus) clearCompositionRef();
@@ -383,13 +402,17 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground) {
     const uint64_t focusHwnd = reinterpret_cast<uint64_t>(GetFocus());
     if (!fForeground) {
         activeHwnd_ = 0;
+        lastCaretValid_ = false;
         pipe_.setNotifyHwnd(0);
+        inProcCand_.hide();
         {
             std::lock_guard<std::mutex> lock(notifyMutex_);
             pendingNotifies_.clear();
         }
     } else if (focusHwnd != 0) {
         if (focusHwnd != activeHwnd_) {
+            lastCaretValid_ = false;
+            inProcCand_.hide();
             std::lock_guard<std::mutex> lock(notifyMutex_);
             pendingNotifies_.clear();
         }
@@ -401,6 +424,9 @@ STDMETHODIMP CTextService::OnSetFocus(BOOL fForeground) {
     req.type = ipc::MsgType::FocusChanged;
     req.focusGained = fForeground ? 1 : 0;
     req.hwnd = focusHwnd;
+    if (fForeground && shouldUseInProcessOverlay(focusHwnd)) {
+        req.reserved |= ipc::ReqFlagInProcUi;
+    }
     ipc::Response resp{};
     pipe_.sendRequest(req, resp);
     if (!fForeground) clearCompositionRef();
@@ -451,6 +477,7 @@ STDMETHODIMP CTextService::OnPreservedKey(ITfContext*, REFGUID, BOOL* pfEaten) {
 
 STDMETHODIMP CTextService::OnCompositionTerminated(TfEditCookie, ITfComposition*) {
     clearCompositionRef();
+    inProcCand_.hide();
     ipc::Request req{};
     req.type = ipc::MsgType::ResetComposition;
     ipc::Response resp{};

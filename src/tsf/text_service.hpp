@@ -2,6 +2,7 @@
 
 #include "tsf/tsf_compat.hpp"
 #include "tsf/pipe_client.hpp"
+#include "tsf/inproc_candidate_window.hpp"
 #include "common/ipc_protocol.hpp"
 
 #include <mutex>
@@ -13,6 +14,7 @@ namespace liteime::tsf {
 class CTextService final : public ITfTextInputProcessorEx,
                            public ITfThreadMgrEventSink,
                            public ITfTextEditSink,
+                           public ITfTextLayoutSink,
                            public ITfKeyEventSink,
                            public ITfCompositionSink,
                            public ITfDisplayAttributeProvider {
@@ -40,6 +42,9 @@ public:
     // ITfTextEditSink
     STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord) override;
 
+    // ITfTextLayoutSink
+    STDMETHODIMP OnLayoutChange(ITfContext* pic, TfLayoutCode lcode, ITfContextView* pView) override;
+
     // ITfKeyEventSink
     STDMETHODIMP OnSetFocus(BOOL fForeground) override;
     STDMETHODIMP OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) override;
@@ -60,6 +65,7 @@ public:
     HRESULT queryCaretInSession(TfEditCookie ec, ITfContext* pContext, RECT* outRect, BOOL* outFound);
     bool isContextAndHwndFocused(ITfContext* pContext, uint64_t expectedHwnd) const;
     void sendCaretUpdate(int caretX, int caretY, int caretH, uint64_t hwndVal);
+    uint64_t currentActiveHwnd() const { return activeHwnd_; }
     void clearCompositionRef();
 
 private:
@@ -76,6 +82,10 @@ private:
     void initDisplayAttributeAtom();
 
     void fillCaretPos(ITfContext* pic, ipc::Request& req);
+    bool shouldUseInProcessOverlay(uint64_t focusHwnd) const;
+    void syncOverlayFromResponse(const ipc::Response& resp, int caretX, int caretY, int caretH, uint64_t hwndVal, bool inProcUi);
+    void handleOverlaySelect(int slotIdx);
+    void handleOverlayPage(bool isNext);
     void applyResponseAsync(ITfContext* pic, const ipc::Response& resp,
                             bool hasPreCaret, int preCaretX, int preCaretY, uint64_t hwndVal,
                             bool requireActiveFocus = false);
@@ -87,17 +97,23 @@ private:
     TfClientId clientId_ = TF_CLIENTID_NULL;
     DWORD threadMgrCookie_ = TF_INVALID_COOKIE;
     DWORD textEditCookie_ = TF_INVALID_COOKIE;
+    DWORD textLayoutCookie_ = TF_INVALID_COOKIE;
     ITfContext* textEditContext_ = nullptr;
     ITfComposition* composition_ = nullptr;
     TfGuidAtom displayAttrAtom_ = TF_INVALID_GUIDATOM;
     bool isComposing_ = false;
     bool ignoreNextEndEdit_ = false;
+    bool lastCaretValid_ = false;
+    int lastCaretX_ = 300;
+    int lastCaretY_ = 300;
+    int lastCaretH_ = 22;
     uint64_t activeHwnd_ = 0;
 
     HWND notifyHwnd_ = nullptr;
     std::mutex notifyMutex_;
     std::vector<ipc::NotifyPacket> pendingNotifies_;
 
+    InProcCandidateWindow inProcCand_;
     PipeClient pipe_;
 };
 

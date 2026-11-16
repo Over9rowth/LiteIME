@@ -48,6 +48,7 @@ add_library(${LITEIME_TSF_TARGET} SHARED
     src/tsf/register.cpp
     src/tsf/pipe_client.cpp
     src/tsf/display_attribute.cpp
+    src/tsf/inproc_candidate_window.cpp
     src/tsf/composition.cpp
     src/tsf/text_service.cpp
     src/tsf/LiteIME.def
@@ -64,6 +65,7 @@ target_link_libraries(${LITEIME_TSF_TARGET} PRIVATE
     oleaut32
     uuid
     user32
+    gdi32
     advapi32
 )
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)

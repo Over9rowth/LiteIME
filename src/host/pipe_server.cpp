@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <sddl.h>
 #include <string>
 
@@ -239,8 +240,9 @@ void PipeServer::handleClient(HANDLE hPipe, uint64_t connId) {
 
         ipc::Response resp{};
         const bool isV1 = (req.version == ipc::kProtocolVersionV1);
-        const bool isV2 = (req.version == ipc::kProtocolVersion);
-        if (req.magic == ipc::kProtocolMagic && (isV1 || isV2)) {
+        const bool isV2 = (req.version == ipc::kProtocolVersionV2);
+        const bool isV3 = (req.version == ipc::kProtocolVersion);
+        if (req.magic == ipc::kProtocolMagic && (isV1 || isV2 || isV3)) {
             if (running_.load(std::memory_order_acquire) && onRequest_) {
                 onRequest_(req, resp, connId, static_cast<uint32_t>(clientPid));
             }
@@ -269,6 +271,28 @@ void PipeServer::handleClient(HANDLE hPipe, uint64_t connId) {
                 respV1.commitLen = static_cast<uint16_t>(n);
             }
             if (!WriteFile(hPipe, &respV1, sizeof(respV1), &bytesWritten, nullptr)) {
+                break;
+            }
+        } else if (isV2) {
+            ipc::ResponseV2 respV2{};
+            respV2.magic = resp.magic;
+            respV2.version = ipc::kProtocolVersionV2;
+            respV2.consumed = resp.consumed;
+            respV2.isEnglish = resp.isEnglish;
+            respV2.isFullWidth = resp.isFullWidth;
+            respV2.isCnPunct = resp.isCnPunct;
+            respV2.isComposing = resp.isComposing;
+            respV2.reserved = resp.reserved;
+            respV2.preeditLen = resp.preeditLen;
+            respV2.commitLen = resp.commitLen;
+            respV2.caretPos = resp.caretPos;
+            if (resp.preeditLen > 0) {
+                std::memcpy(respV2.preedit, resp.preedit, std::min<size_t>(resp.preeditLen, sizeof(respV2.preedit)));
+            }
+            if (resp.commitLen > 0) {
+                std::memcpy(respV2.commit, resp.commit, std::min<size_t>(resp.commitLen, sizeof(respV2.commit)));
+            }
+            if (!WriteFile(hPipe, &respV2, sizeof(respV2), &bytesWritten, nullptr)) {
                 break;
             }
         } else {
