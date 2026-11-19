@@ -83,11 +83,18 @@ def send_ipc(pipe, msg_type: int, vk: int = 0, mods: int = 0, key_up: int = 0, f
 def main() -> int:
     user_dict = pathlib.Path(os.environ.get("APPDATA", "")) / "LiteIME" / "user_dict.tsv"
     saved_user_dict = user_dict.read_bytes() if user_dict.exists() else None
+    pins_tsv = user_dict.parent / "pins.tsv"
+    saved_pins_tsv = pins_tsv.read_bytes() if pins_tsv.exists() else None
+    bigram_tsv = user_dict.parent / "user_bigram.tsv"
+    saved_bigram_tsv = bigram_tsv.read_bytes() if bigram_tsv.exists() else None
     quick_tsv = user_dict.parent / "quick_input.tsv"
     saved_quick_tsv = quick_tsv.read_bytes() if quick_tsv.exists() else None
     config_ini = user_dict.parent / "config.ini"
     saved_config_ini = config_ini.read_bytes() if config_ini.exists() else None
     config_ini.parent.mkdir(parents=True, exist_ok=True)
+    user_dict.write_text("# LiteIME Smoke Clean User Dict\n", encoding="utf-8")
+    pins_tsv.write_text("# LiteIME Smoke Clean Pins\n", encoding="utf-8")
+    bigram_tsv.write_text("# LiteIME Smoke Clean Bigram\n", encoding="utf-8")
     quick_tsv.write_text("# LiteIME Smoke Quick Input\nsecret\tSMOKE_SECRET_991\n", encoding="utf-8")
     config_ini.write_text(
         "# LiteIME Smoke Test Config\n"
@@ -314,6 +321,19 @@ def main() -> int:
         assert v3_prev[19] == 0
         v3_sel = send_v3(7, 0)
         assert v3_sel[2] == 1 and v3_sel[9] > 0, f"SelectCandidate must commit non-empty UTF-8: {v3_sel[:11]}"
+
+        # 9e. One-shot phrase memory over IPC ("shuoxiesm" -> 说些 + 什么 -> "sxsm" & "shuoxiesm")
+        for ch in "SHUOXIESM":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("1"), 0, 0)["is_composing"]  # "说些", remaining "sm"
+        r_mem_done = send_ipc(pipe, 2, ord("1"), 0, 0)              # "什么" -> commits "说些什么"
+        assert r_mem_done["commit"] == "说些什么", f"Expected 说些什么, got {r_mem_done!r}"
+        for recall in ("SXSM", "SHUOXIESM"):
+            for ch in recall:
+                r_rc = send_ipc(pipe, 2, ord(ch), 0, 0)
+            assert "说些什么" in r_rc["preedit"], f"Expected 说些什么 recalled on {recall}, got {r_rc!r}"
+            send_ipc(pipe, 2, 0x1B, 0, 0)
+
         send_ipc(pipe, 3, focus=1)  # Restore normal desktop UI flag before section 10
 
         # 10. Modal UI non-blocking & multi-client IPC concurrency regression test:
@@ -384,6 +404,14 @@ def main() -> int:
             user_dict.write_bytes(saved_user_dict)
         elif user_dict.exists():
             user_dict.unlink()
+        if saved_pins_tsv is not None:
+            pins_tsv.write_bytes(saved_pins_tsv)
+        elif pins_tsv.exists():
+            pins_tsv.unlink()
+        if saved_bigram_tsv is not None:
+            bigram_tsv.write_bytes(saved_bigram_tsv)
+        elif bigram_tsv.exists():
+            bigram_tsv.unlink()
         if saved_config_ini is not None:
             config_ini.parent.mkdir(parents=True, exist_ok=True)
             config_ini.write_bytes(saved_config_ini)

@@ -1521,6 +1521,105 @@ int wmain() {
             CHECK(!udR2.lookup("baoliu").empty());
             CHECK(udR2.getBigramBonus("保留", "记录") > 1.0);
         }
+
+        // One-shot assembled phrase memory & mixed/jianpin/full recall ("shuoxiesm" -> "说些什么" -> "sxsm" / "shuoxiesm")
+        {
+            std::vector<RawPhraseRecord> memPhrases = {
+                {"说些", "shuo xie", 20000, 2},
+                {"什么", "shen me", 50000, 2},
+                {"说", "shuo", 15000, 1},
+                {"些", "xie", 12000, 1},
+                {"四", "si", 10000, 1},
+                {"吗", "ma", 10000, 1},
+                {"呢", "ne", 15000, 1},
+                {"实现什么", "shi xian shen me", 40000, 4},
+                {"思绪散漫", "si xu san man", 35000, 4},
+            };
+            const std::filesystem::path memDictPath = tmpDir / "mem_phrase.dict";
+            CHECK(BinaryDict::compileToFile(memDictPath, memPhrases, {}));
+            BinaryDict memDict;
+            CHECK(memDict.loadFile(memDictPath));
+
+            const std::filesystem::path memUserPath = tmpDir / "mem_user" / "user_dict.tsv";
+            std::filesystem::remove_all(memUserPath.parent_path());
+
+            BilingualEngine memEng;
+            memEng.setDictionary(&memDict);
+            memEng.userDict().load(memUserPath);
+
+            // Step 1: First-time composition on "shuoxiesm": select "说些", leaving "sm", then select "什么"
+            typeWord(memEng, "shuoxiesm");
+            int idxShuoXie = -1;
+            for (size_t i = 0; i < memEng.currentPageItems().size(); ++i) {
+                if (memEng.currentPageItems()[i].text == "说些") {
+                    idxShuoXie = static_cast<int>(i);
+                    break;
+                }
+            }
+            CHECK(idxShuoXie >= 0);
+            auto s1 = memEng.selectCandidateOnPage(idxShuoXie);
+            CHECK(s1.consumed && s1.commitText.empty());
+            CHECK(memEng.isComposing() && memEng.rawBuffer() == "sm");
+
+            int idxShenMe = -1;
+            for (size_t i = 0; i < memEng.currentPageItems().size(); ++i) {
+                if (memEng.currentPageItems()[i].text == "什么") {
+                    idxShenMe = static_cast<int>(i);
+                    break;
+                }
+            }
+            CHECK(idxShenMe >= 0);
+            auto s2 = memEng.selectCandidateOnPage(idxShenMe);
+            CHECK(s2.consumed && s2.commitText == "说些什么");
+
+            // Step 2: Immediately recall in 1 shot via mixed "shuoxiesm", pure jianpin "sxsm", "shxsm", full "shuoxieshenme"
+            typeWord(memEng, "shuoxiesm");
+            CHECK(!memEng.currentPageItems().empty() && memEng.currentPageItems()[0].text == "说些什么");
+            memEng.handleKey(0x1B, 0, false);
+
+            typeWord(memEng, "sxsm");
+            CHECK(!memEng.currentPageItems().empty() && memEng.currentPageItems()[0].text == "说些什么");
+            memEng.handleKey(0x1B, 0, false);
+
+            typeWord(memEng, "shxsm");
+            CHECK(!memEng.currentPageItems().empty() && memEng.currentPageItems()[0].text == "说些什么");
+            memEng.handleKey(0x1B, 0, false);
+
+            typeWord(memEng, "shuoxieshenme");
+            CHECK(!memEng.currentPageItems().empty() && memEng.currentPageItems()[0].text == "说些什么");
+            memEng.handleKey(0x1B, 0, false);
+
+            // Prefix recall in longer query ("shuoxiesmne" surfaces "说些什么")
+            typeWord(memEng, "shuoxiesmne");
+            bool foundMemPrefix = false;
+            for (const auto& c : memEng.allCandidates()) {
+                if (c.text == "说些什么") {
+                    foundMemPrefix = true;
+                    break;
+                }
+            }
+            CHECK(foundMemPrefix);
+            memEng.handleKey(0x1B, 0, false);
+
+            // Step 3: Persistence across save & reload (isPhrase flag preserved on disk)
+            CHECK(memEng.userDict().saveIfDirty());
+            BilingualEngine memReloaded;
+            memReloaded.setDictionary(&memDict);
+            CHECK(memReloaded.userDict().load(memUserPath));
+            typeWord(memReloaded, "sxsm");
+            CHECK(!memReloaded.currentPageItems().empty() && memReloaded.currentPageItems()[0].text == "说些什么");
+            typeWord(memReloaded, "shuoxiesm");
+            CHECK(!memReloaded.currentPageItems().empty() && memReloaded.currentPageItems()[0].text == "说些什么");
+
+            // Step 4: Ctrl+Delete cleanly removes the learned phrase
+            CHECK(memReloaded.handleKey(0x2E, 0x02 /*ModCtrl*/, false).consumed);
+            bool stillPresent = false;
+            for (const auto& c : memReloaded.allCandidates()) {
+                if (c.text == "说些什么") stillPresent = true;
+            }
+            CHECK(!stillPresent);
+            memReloaded.handleKey(0x1B, 0, false);
+        }
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

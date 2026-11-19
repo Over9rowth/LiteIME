@@ -235,9 +235,11 @@ void BilingualEngine::rebuildCandidates() {
             // Also include any user-learned / promoted word for this exact full key not already in top exactHits
             for (const auto& u : userDict_.lookup(key)) {
                 uint32_t tier = UserDict::tierForCount(u.count);
-                if (tier >= 1 || u.word.size() > 3) {
+                if (tier >= 1 || u.isPhrase || u.word.size() > 3) {
                     hasFullExactChinese = true;
-                    double sc = 330.0 - pathPenalty;
+                    double sc = (u.isPhrase ? 420.0 : 330.0) +
+                                static_cast<double>(std::min<uint32_t>(u.count, 100)) * 4.0 +
+                                static_cast<double>(u.lastUsed) * 1e-4 - pathPenalty;
                     double effectiveScore = sc + static_cast<double>(tier) * 1000.0;
                     if (effectiveScore > bestExactPhraseScore) {
                         bestExactPhraseScore = effectiveScore;
@@ -251,6 +253,36 @@ void BilingualEngine::rebuildCandidates() {
             std::string altHdr = buildHeaderForPath(paths[bestExactPhrasePathIdx]);
             if (!altHdr.empty()) {
                 segmentedHeader_ = std::move(altHdr);
+            }
+        }
+
+        // 3b-user. User-assembled & learned multi-syllable phrases matching mixed full/prefix/jianpin patterns
+        // e.g. once "说些什么" (shuo xie shen me) is assembled from "shuoxiesm", both "shuoxiesm" and "sxsm" recall it immediately.
+        for (size_t pIdx = 0; pIdx < paths.size(); ++pIdx) {
+            const auto& path = paths[pIdx];
+            if (path.tokens.size() < 2) continue;
+            if (!std::any_of(path.tokens.begin(), path.tokens.end(), [](const SyllableToken& t) { return t.isPartial; })) {
+                continue; // Full-syllable exact matches already handled in 3a & 3b
+            }
+            const double pathPenalty = static_cast<double>(pIdx) * 8.0;
+            std::vector<std::pair<std::string_view, bool>> patTokens;
+            patTokens.reserve(path.tokens.size());
+            for (const auto& tok : path.tokens) {
+                patTokens.emplace_back(tok.text, tok.isPartial);
+            }
+            for (const auto& [uKey, uEntry] : userDict_.lookupByTokenPattern(patTokens)) {
+                const uint32_t tier = UserDict::tierForCount(uEntry.count);
+                if (!uEntry.isPhrase && tier == 0) continue;
+                const double sc = (uEntry.isPhrase ? 380.0 : 320.0) +
+                                  static_cast<double>(std::min<uint32_t>(uEntry.count, 100)) * 5.0 +
+                                  static_cast<double>(uEntry.lastUsed) * 1e-4 - pathPenalty;
+                const int rank = 91;
+                const CandidateKind kind = (path.tokens.size() == tokCount &&
+                    std::all_of(path.tokens.begin(), path.tokens.end(),
+                                [](const SyllableToken& t) { return t.text.size() <= 2; }))
+                    ? CandidateKind::ChineseJianpin
+                    : CandidateKind::ChinesePhrase;
+                addScored(uEntry.word, "", uKey, rawBuffer_.size(), sc, kind, rank, tier);
             }
         }
 
@@ -419,6 +451,20 @@ void BilingualEngine::rebuildCandidates() {
                                 addScored(uEntry.word, "", uKey, consumedBytes, sc,
                                           CandidateKind::ChineseJianpin, 72, tier);
                             }
+                        }
+                    }
+                    if (pIdx == 0) {
+                        std::vector<std::pair<std::string_view, bool>> prefixPat;
+                        prefixPat.reserve(len);
+                        for (size_t k = 0; k < len; ++k) {
+                            prefixPat.emplace_back(path.tokens[k].text, path.tokens[k].isPartial);
+                        }
+                        for (const auto& [uKey, uEntry] : userDict_.lookupByTokenPattern(prefixPat)) {
+                            uint32_t tier = UserDict::tierForCount(uEntry.count);
+                            if (!uEntry.isPhrase && tier == 0) continue;
+                            double sc = 195.0 + lenBonus + static_cast<double>(std::min<uint32_t>(uEntry.count, 100)) * 4.0 - pathPenalty;
+                            addScored(uEntry.word, "", uKey, consumedBytes, sc,
+                                      CandidateKind::ChinesePhrase, uEntry.isPhrase ? 80 : 74, tier);
                         }
                     }
                 } else {

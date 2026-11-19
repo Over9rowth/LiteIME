@@ -327,7 +327,7 @@ void BilingualEngine::flushPendingLearnedPhrase() {
         std::string key = committedPrefixPinyin_;
         while (!key.empty() && key.back() == ' ') key.pop_back();
         if (key.find(' ') != std::string::npos) {
-            userDict_.recordSelection(key, committedPrefixWords_);
+            userDict_.recordSelection(key, committedPrefixWords_, true);
         }
     }
 }

@@ -15,6 +15,7 @@ struct UserEntry {
     std::string word;
     uint32_t count = 1;
     uint64_t lastUsed = 0;
+    bool isPhrase = false;
 };
 
 struct PinnedEntry {
@@ -35,7 +36,7 @@ public:
     bool dirty() const { return dirty_ || bigramDirty_; }
     void markDirty() { dirty_ = true; }
 
-    void recordSelection(std::string_view pinyinKey, std::string_view word);
+    void recordSelection(std::string_view pinyinKey, std::string_view word, bool isAssembledPhrase = false);
     bool removeEntry(std::string_view pinyinKey, std::string_view word);
 
     // Dynamic user bigram co-occurrence learning ("prevWord -> curWord")
@@ -48,6 +49,10 @@ public:
     std::vector<UserEntry> lookup(std::string_view pinyinKey) const;
     std::vector<std::pair<std::string, UserEntry>> lookupSingleSyllablePrefix(std::string_view prefix) const;
     std::vector<std::pair<std::string, UserEntry>> lookupByInitials(std::string_view initials) const;
+    // Matches multi-syllable user entries against mixed full-syllable / partial-initial tokens:
+    // each pair is (normalizedTokenText, isPartial).
+    std::vector<std::pair<std::string, UserEntry>> lookupByTokenPattern(
+        const std::vector<std::pair<std::string_view, bool>>& patternTokens) const;
     uint32_t getBoost(std::string_view pinyinKey, std::string_view word) const;
     uint32_t getTier(std::string_view pinyinKey, std::string_view word) const;
 

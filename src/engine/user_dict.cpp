@@ -116,18 +116,25 @@ bool UserDict::load(const std::filesystem::path& path) {
             std::string word = line.substr(t1 + 1, t2 - t1 - 1);
             uint32_t count = 1;
             uint64_t ts = 1;
+            bool isPhrase = false;
             try {
                 if (t3 == std::string::npos) {
                     count = static_cast<uint32_t>(std::stoul(line.substr(t2 + 1)));
                 } else {
                     count = static_cast<uint32_t>(std::stoul(line.substr(t2 + 1, t3 - t2 - 1)));
-                    ts = std::stoull(line.substr(t3 + 1));
+                    size_t t4 = line.find('\t', t3 + 1);
+                    if (t4 == std::string::npos) {
+                        ts = std::stoull(line.substr(t3 + 1));
+                    } else {
+                        ts = std::stoull(line.substr(t3 + 1, t4 - t3 - 1));
+                        isPhrase = (std::stoul(line.substr(t4 + 1)) != 0);
+                    }
                 }
             } catch (...) {
                 continue;
             }
             clock_ = std::max(clock_, ts + 1);
-            entries_[std::move(key)].push_back(UserEntry{std::move(word), count, ts});
+            entries_[std::move(key)].push_back(UserEntry{std::move(word), count, ts, isPhrase});
         }
 
         for (auto& [k, vec] : entries_) {
@@ -154,10 +161,12 @@ bool UserDict::saveIfDirty() const {
 bool UserDict::save() const {
     if (path_.empty()) return false;
     std::ostringstream oss;
-    oss << "# LiteIME User Dictionary (pinyin\\tword\\tcount\\tlastUsed)\n";
+    oss << "# LiteIME User Dictionary (pinyin\\tword\\tcount\\tlastUsed[\\tflags])\n";
     for (const auto& [key, vec] : entries_) {
         for (const auto& e : vec) {
-            oss << key << '\t' << e.word << '\t' << e.count << '\t' << e.lastUsed << '\n';
+            oss << key << '\t' << e.word << '\t' << e.count << '\t' << e.lastUsed;
+            if (e.isPhrase) oss << "\t1";
+            oss << '\n';
         }
     }
     const bool ok = atomicWriteTextFile(path_, oss.str());
@@ -165,7 +174,7 @@ bool UserDict::save() const {
     return ok;
 }
 
-void UserDict::recordSelection(std::string_view pinyinKey, std::string_view word) {
+void UserDict::recordSelection(std::string_view pinyinKey, std::string_view word, bool isAssembledPhrase) {
     if (pinyinKey.empty() || word.empty()) return;
     auto& vec = entries_[std::string(pinyinKey)];
     ++clock_;
@@ -174,6 +183,7 @@ void UserDict::recordSelection(std::string_view pinyinKey, std::string_view word
         if (e.word == word) {
             ++e.count;
             e.lastUsed = clock_;
+            if (isAssembledPhrase) e.isPhrase = true;
             std::sort(vec.begin(), vec.end(), [](const UserEntry& a, const UserEntry& b) {
                 if (a.count != b.count) return a.count > b.count;
                 return a.lastUsed > b.lastUsed;
@@ -181,7 +191,7 @@ void UserDict::recordSelection(std::string_view pinyinKey, std::string_view word
             return;
         }
     }
-    vec.push_back(UserEntry{std::string(word), 1, clock_});
+    vec.push_back(UserEntry{std::string(word), 1, clock_, isAssembledPhrase});
     std::sort(vec.begin(), vec.end(), [](const UserEntry& a, const UserEntry& b) {
         if (a.count != b.count) return a.count > b.count;
         return a.lastUsed > b.lastUsed;
@@ -247,6 +257,57 @@ std::vector<std::pair<std::string, UserEntry>> UserDict::lookupByInitials(std::s
             }
         }
     }
+    return out;
+}
+
+std::vector<std::pair<std::string, UserEntry>> UserDict::lookupByTokenPattern(
+    const std::vector<std::pair<std::string_view, bool>>& patternTokens) const {
+    std::vector<std::pair<std::string, UserEntry>> out;
+    const size_t targetCount = patternTokens.size();
+    if (targetCount < 2) return out;
+    for (const auto& t : patternTokens) {
+        if (t.first.empty()) return out;
+    }
+
+    for (const auto& [key, vec] : entries_) {
+        size_t sylCount = 1;
+        for (char c : key) {
+            if (c == ' ') ++sylCount;
+        }
+        if (sylCount != targetCount) continue;
+
+        bool match = true;
+        size_t pos = 0;
+        for (size_t idx = 0; idx < targetCount; ++idx) {
+            size_t next = key.find(' ', pos);
+            if (next == std::string::npos) next = key.size();
+            const std::string_view syl(key.data() + pos, next - pos);
+            const std::string_view tok = patternTokens[idx].first;
+            const bool isPartial = patternTokens[idx].second;
+            if (isPartial || tok.size() == 1) {
+                if (!syl.starts_with(tok)) {
+                    match = false;
+                    break;
+                }
+            } else if (syl != tok) {
+                match = false;
+                break;
+            }
+            pos = next + 1;
+        }
+
+        if (match) {
+            for (const auto& e : vec) {
+                out.emplace_back(key, e);
+            }
+        }
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.second.isPhrase != b.second.isPhrase) return a.second.isPhrase > b.second.isPhrase;
+        if (a.second.count != b.second.count) return a.second.count > b.second.count;
+        return a.second.lastUsed > b.second.lastUsed;
+    });
     return out;
 }
 
