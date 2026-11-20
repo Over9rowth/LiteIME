@@ -22,6 +22,7 @@ struct CandidateViewState {
     SkinTheme skin = SkinTheme::CloudMist;
     CandidateLayout layout = CandidateLayout::Horizontal;
     bool squareFrame = true;
+    engine::SymbolCatalogMode catalogMode = engine::SymbolCatalogMode::None;
     int caretX = 200;
     int caretY = 200;
     int caretHeight = 20;
@@ -58,6 +59,8 @@ private:
     void hidePinPopup();
     void renderPinPopup();
     void renderAndShow();
+    void renderSymbolGrid();
+    void presentCardSurface(HDC screenDC, float shadowPad, float scale, int pxW, int pxH);
     void ensureD2DResources();
     void releaseD2DResources();
 

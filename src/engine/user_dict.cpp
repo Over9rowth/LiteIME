@@ -148,6 +148,7 @@ bool UserDict::load(const std::filesystem::path& path) {
     if (!pinsPath().empty()) loadPins(pinsPath());
     if (!quickInputsPath().empty()) loadQuickInputs(quickInputsPath());
     if (!bigramsPath().empty()) loadBigrams(bigramsPath());
+    if (!customKaomojisPath().empty()) loadCustomKaomojis(customKaomojisPath());
     return loadedMain;
 }
 
@@ -635,6 +636,102 @@ bool UserDict::saveQuickInputs() const {
     return atomicWriteTextFile(p, oss.str());
 }
 
+std::filesystem::path UserDict::customKaomojisPath() const {
+    if (path_.empty()) return {};
+    return path_.parent_path() / "custom_kaomoji.tsv";
+}
+
+bool UserDict::setCustomKaomojis(std::vector<CustomKaomojiItem> items) {
+    items.erase(std::remove_if(items.begin(), items.end(), [](const CustomKaomojiItem& k) {
+        return k.text.empty();
+    }), items.end());
+    customKaomojis_ = std::move(items);
+    return true;
+}
+
+bool UserDict::loadCustomKaomojis(const std::filesystem::path& path) {
+    customKaomojis_.clear();
+    hasCustomKaomojisMtime_ = false;
+    if (path.empty()) return false;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        // Seed neutral, everyday custom kaomoji examples ready for easy customization
+        customKaomojis_ = {
+            {"(*^▽^*)",      "开心",   "kaixin|kx|gaoxing"},
+            {"(๑•̀ㅂ•́)و✧",  "加油",   "jiayou|jy|bangbang"},
+            {"(ง •̀_•́)ง",   "冲鸭",   "chongya|cy|jiayou"},
+            {"(｡･ω･｡)ﾉ♡",   "比心",   "bixin|bx|xiexie"},
+            {"_(┐「ε:)_",   "躺平",   "tangping|moyu|tp|my"},
+            {"┐(´д｀)┌",    "无奈",   "wunai|wn|ganga"},
+        };
+        if (path.has_parent_path()) {
+            std::filesystem::create_directories(path.parent_path(), ec);
+        }
+        saveCustomKaomojis();
+        customKaomojisMtime_ = std::filesystem::last_write_time(path, ec);
+        hasCustomKaomojisMtime_ = !ec;
+        return true;
+    }
+
+    std::ifstream ifs(path);
+    if (!ifs) return false;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        size_t t1 = line.find('\t');
+        std::string text;
+        std::string label;
+        std::string keywords;
+        if (t1 == std::string::npos) {
+            text = unescapeQuickField(line);
+        } else {
+            text = unescapeQuickField(std::string_view(line.data(), t1));
+            size_t t2 = line.find('\t', t1 + 1);
+            if (t2 == std::string::npos) {
+                label = unescapeQuickField(std::string_view(line.data() + t1 + 1, line.size() - t1 - 1));
+            } else {
+                label = unescapeQuickField(std::string_view(line.data() + t1 + 1, t2 - t1 - 1));
+                keywords = unescapeQuickField(std::string_view(line.data() + t2 + 1, line.size() - t2 - 1));
+            }
+        }
+        if (!text.empty()) {
+            customKaomojis_.push_back(CustomKaomojiItem{
+                std::move(text), std::move(label), std::move(keywords)});
+        }
+    }
+    customKaomojisMtime_ = std::filesystem::last_write_time(path, ec);
+    hasCustomKaomojisMtime_ = !ec;
+    return true;
+}
+
+bool UserDict::reloadCustomKaomojisIfChanged() {
+    auto p = customKaomojisPath();
+    if (p.empty()) return false;
+    std::error_code ec;
+    if (!std::filesystem::exists(p, ec)) return false;
+    auto mtime = std::filesystem::last_write_time(p, ec);
+    if (ec) return false;
+    if (hasCustomKaomojisMtime_ && mtime == customKaomojisMtime_) return false;
+    return loadCustomKaomojis(p);
+}
+
+bool UserDict::saveCustomKaomojis() const {
+    auto p = customKaomojisPath();
+    if (p.empty()) return false;
+    std::ostringstream oss;
+    oss << "# LiteIME 自定义颜文字库 (格式: 颜文字\\t标签\\t拼音触发词(|分隔))\n"
+        << "# 提示: 可直接增删改本文件，保存后输入法会自动热重载；也支持在 vvvv 面板内点“自定义颜文字”管理。\n";
+    for (const auto& k : customKaomojis_) {
+        if (k.text.empty()) continue;
+        oss << escapeQuickField(k.text) << '\t'
+            << escapeQuickField(k.label) << '\t'
+            << escapeQuickField(k.keywords) << '\n';
+    }
+    return atomicWriteTextFile(p, oss.str());
+}
+
 bool UserDict::loadConfig(const std::filesystem::path& path, EngineConfig& cfg) {
     std::ifstream ifs(path);
     if (!ifs) return false;
@@ -741,6 +838,8 @@ void UserDict::clear() {
     pins_.clear();
     bigrams_.clear();
     quickInputs_.clear();
+    customKaomojis_.clear();
+    hasCustomKaomojisMtime_ = false;
     dirty_ = false;
     bigramDirty_ = false;
 }

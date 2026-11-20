@@ -14,6 +14,8 @@ constexpr UINT WM_APP_STATUS_POS_CHANGED = WM_APP + 108;
 constexpr UINT WM_APP_CANDIDATE_CLICK = WM_APP + 109;
 constexpr UINT WM_APP_CANDIDATE_PAGE = WM_APP + 110;
 constexpr UINT WM_APP_OPEN_SETTINGS = WM_APP + 111;
+constexpr UINT WM_APP_SWITCH_SYMBOL_TAB = WM_APP + 112;
+constexpr UINT WM_APP_OPEN_CUSTOM_KAOMOJI = WM_APP + 113;
 
 enum class HostAction : WPARAM {
     ToggleChineseEnglish = 1,
@@ -54,6 +56,7 @@ enum class HostAction : WPARAM {
     SetSchemeMicrosoft = 43,
     SetSchemeZiranma = 44,
     SetSchemeSogou = 45,
+    OpenCustomKaomojiManager = 46,
 };
 
 inline UINT queryDpiForWindow(HWND hwnd) {

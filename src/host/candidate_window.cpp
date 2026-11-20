@@ -141,6 +141,7 @@ void CandidateWindow::hide() {
 
 void CandidateWindow::update(const CandidateViewState& state) {
     const bool layoutChanged = (state_.page != state.page ||
+                                state_.catalogMode != state.catalogMode ||
                                 state_.headerBuffer != state.headerBuffer ||
                                 state_.items.size() != state.items.size());
     state_ = state;
@@ -154,7 +155,351 @@ void CandidateWindow::update(const CandidateViewState& state) {
     renderAndShow();
 }
 
+void CandidateWindow::presentCardSurface(HDC screenDC, float shadowPad, float scale, int pxW, int pxH) {
+    POINT caretPt{state_.caretX, state_.caretY};
+    HMONITOR mon = MonitorFromPoint(caretPt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(mon, &mi);
+
+    const int padPx = static_cast<int>(std::round(shadowPad * scale));
+    const int clampedCaretH = std::clamp(state_.caretHeight, 12, 64);
+    int posX = state_.caretX - padPx;
+    int posY = state_.caretY + static_cast<int>(std::round(6.0f * scale)) - padPx;
+
+    if (posX + pxW > mi.rcWork.right) posX = mi.rcWork.right - pxW;
+    if (posX < mi.rcWork.left) posX = mi.rcWork.left;
+    if (posY + pxH > mi.rcWork.bottom) {
+        posY = state_.caretY - clampedCaretH - pxH + padPx - static_cast<int>(std::round(6.0f * scale));
+    }
+    if (posY + pxH > mi.rcWork.bottom) posY = mi.rcWork.bottom - pxH;
+    if (posY < mi.rcWork.top) posY = mi.rcWork.top;
+
+    POINT dstPt{posX, posY};
+    SIZE winSz{pxW, pxH};
+    POINT srcPt{0, 0};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+
+    UpdateLayeredWindow(hwnd_, screenDC, &dstPt, &winSz, cardSurface_.dc(), &srcPt, 0, &blend, ULW_ALPHA);
+    SetWindowPos(hwnd_, HWND_TOPMOST, posX, posY, pxW, pxH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void CandidateWindow::renderSymbolGrid() {
+    ensureD2DResources();
+    if (!hwnd_ || !dcTarget_ || !dwFactory_ || !textFmt_ || !smallFmt_ || !indexFmt_) return;
+
+    UINT dpi = queryDpiForWindow(hwnd_);
+    if (dpi == 0) dpi = 96;
+    const float scale = static_cast<float>(dpi) / 96.0f;
+
+    const float shadowPad = 14.0f;
+    const float padX = 14.0f;
+    const float cardW = 512.0f;
+    const float cardH = 368.0f;
+
+    const int dipW = static_cast<int>(std::ceil(cardW + shadowPad * 2.0f));
+    const int dipH = static_cast<int>(std::ceil(cardH + shadowPad * 2.0f));
+    const int pxW = static_cast<int>(std::ceil(dipW * scale));
+    const int pxH = static_cast<int>(std::ceil(dipH * scale));
+
+    HDC screenDC = GetDC(nullptr);
+    if (!cardSurface_.ensure(screenDC, pxW, pxH)) {
+        ReleaseDC(nullptr, screenDC);
+        return;
+    }
+
+    RECT bindRc{0, 0, pxW, pxH};
+    dcTarget_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
+    dcTarget_->BindDC(cardSurface_.dc(), &bindRc);
+
+    const SkinPalette pal = paletteFor(state_.skin);
+    hitRegions_.clear();
+
+    dcTarget_->BeginDraw();
+    dcTarget_->Clear(D2D1::ColorF(0, 0, 0, 0));
+
+    const float cardR = state_.squareFrame ? 8.0f : 14.0f;
+    const float innerR = state_.squareFrame ? 7.0f : 13.0f;
+    const float pillR = state_.squareFrame ? 4.0f : 7.0f;
+    const bool isDark = (state_.skin == SkinTheme::ObsidianInk);
+    const uint32_t shadowRgb = isDark ? 0x000000 : 0x0F172A;
+    const float shadowAlphaBase = isDark ? 0.045f : 0.025f;
+
+    for (int s = 5; s >= 1; --s) {
+        float expand = static_cast<float>(s) * 2.1f;
+        float shadowR = cardR + expand * (state_.squareFrame ? 0.30f : 0.45f);
+        D2D1_ROUNDED_RECT sr{
+            D2D1::RectF(shadowPad - expand, shadowPad - expand + 3.0f,
+                        shadowPad + cardW + expand, shadowPad + cardH + expand + 3.0f),
+            shadowR, shadowR
+        };
+        ID2D1SolidColorBrush* sBrush = nullptr;
+        dcTarget_->CreateSolidColorBrush(D2D1::ColorF(shadowRgb, shadowAlphaBase * (6 - s)), &sBrush);
+        if (sBrush) {
+            dcTarget_->FillRoundedRectangle(sr, sBrush);
+            sBrush->Release();
+        }
+    }
+
+    ID2D1LinearGradientBrush* cardBgBrush = makeVerticalGradient(
+        dcTarget_, shadowPad, shadowPad + cardH, pal.bgTop, pal.bgBottom);
+    ID2D1SolidColorBrush* borderBrush = nullptr;
+    ID2D1SolidColorBrush* innerBrush = nullptr;
+    ID2D1SolidColorBrush* divBrush = nullptr;
+    ID2D1SolidColorBrush* pyBrush = nullptr;
+    ID2D1SolidColorBrush* textBrush = nullptr;
+    ID2D1SolidColorBrush* activeTextBrush = nullptr;
+    ID2D1SolidColorBrush* pillBorderBrush = nullptr;
+    ID2D1SolidColorBrush* accentBrush = nullptr;
+    ID2D1SolidColorBrush* idxBrush = nullptr;
+    ID2D1SolidColorBrush* comBrush = nullptr;
+    ID2D1SolidColorBrush* hoverPillBrush = nullptr;
+    ID2D1SolidColorBrush* cellBgBrush = nullptr;
+    ID2D1SolidColorBrush* activeCellBgBrush = nullptr;
+
+    dcTarget_->CreateSolidColorBrush(pal.border, &borderBrush);
+    dcTarget_->CreateSolidColorBrush(pal.innerHighlight, &innerBrush);
+    dcTarget_->CreateSolidColorBrush(D2D1::ColorF(pal.divider.r, pal.divider.g, pal.divider.b, pal.divider.a * 0.7f), &divBrush);
+    dcTarget_->CreateSolidColorBrush(pal.pinyinText, &pyBrush);
+    dcTarget_->CreateSolidColorBrush(pal.candText, &textBrush);
+    dcTarget_->CreateSolidColorBrush(pal.activeCandText, &activeTextBrush);
+    dcTarget_->CreateSolidColorBrush(pal.activePillBorder, &pillBorderBrush);
+    dcTarget_->CreateSolidColorBrush(pal.accentBar, &accentBrush);
+    dcTarget_->CreateSolidColorBrush(pal.indexText, &idxBrush);
+    dcTarget_->CreateSolidColorBrush(pal.commentText, &comBrush);
+    dcTarget_->CreateSolidColorBrush(
+        D2D1::ColorF(pal.accentBar.r, pal.accentBar.g, pal.accentBar.b, isDark ? 0.16f : 0.10f), &hoverPillBrush);
+    dcTarget_->CreateSolidColorBrush(
+        D2D1::ColorF(isDark ? 0xFFFFFF : 0x0F172A, isDark ? 0.04f : 0.03f), &cellBgBrush);
+    dcTarget_->CreateSolidColorBrush(
+        D2D1::ColorF(pal.accentBar.r, pal.accentBar.g, pal.accentBar.b, isDark ? 0.22f : 0.13f), &activeCellBgBrush);
+
+    D2D1_ROUNDED_RECT cardRect{
+        D2D1::RectF(shadowPad, shadowPad, shadowPad + cardW, shadowPad + cardH),
+        cardR, cardR
+    };
+    if (cardBgBrush) dcTarget_->FillRoundedRectangle(cardRect, cardBgBrush);
+    if (innerBrush) {
+        D2D1_ROUNDED_RECT innerRc{
+            D2D1::RectF(shadowPad + 1.0f, shadowPad + 1.0f, shadowPad + cardW - 1.0f, shadowPad + cardH - 1.0f),
+            innerR, innerR
+        };
+        dcTarget_->DrawRoundedRectangle(innerRc, innerBrush, 1.0f);
+    }
+    if (borderBrush) dcTarget_->DrawRoundedRectangle(cardRect, borderBrush, 1.0f);
+
+    // Row 1: Filter header + "+ 自定义颜文字" button on top right
+    const float customBtnW = 104.0f;
+    D2D1_RECT_F customBtnRc = D2D1::RectF(
+        shadowPad + cardW - padX - customBtnW, shadowPad + 7.0f,
+        shadowPad + cardW - padX, shadowPad + 31.0f);
+    const int customHitIdx = static_cast<int>(hitRegions_.size());
+    hitRegions_.push_back({customBtnRc, 4, 0});
+    if (hoverRegion_ == customHitIdx && hoverPillBrush) {
+        dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(customBtnRc, pillR, pillR), hoverPillBrush);
+    } else if (cellBgBrush) {
+        dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(customBtnRc, pillR, pillR), cellBgBrush);
+    }
+    if (pillBorderBrush) {
+        dcTarget_->DrawRoundedRectangle(D2D1::RoundedRect(customBtnRc, pillR, pillR), pillBorderBrush, 0.8f);
+    }
+    if (pyBrush) {
+        indexFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        dcTarget_->DrawText(L"+ \u81ea\u5b9a\u4e49\u989c\u6587\u5b57", 7, indexFmt_, customBtnRc, pyBrush);
+        indexFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
+
+    D2D1_RECT_F hdrRc = D2D1::RectF(
+        shadowPad + padX, shadowPad + 6.0f, customBtnRc.left - 10.0f, shadowPad + 32.0f);
+    std::wstring headerW = utf8_to_utf16(state_.headerBuffer);
+    if (pyBrush) {
+        dcTarget_->DrawText(headerW.c_str(), static_cast<UINT32>(headerW.size()), smallFmt_, hdrRc, pyBrush,
+                            static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004));
+    }
+
+    // Row 2: 4 Category Tabs
+    struct GridTab {
+        engine::SymbolCatalogMode mode;
+        const wchar_t* title;
+    };
+    static constexpr GridTab kTabs[] = {
+        {engine::SymbolCatalogMode::Kaomoji, L"\u989c\u6587\u5b57"},
+        {engine::SymbolCatalogMode::Emoji,   L"\u5e38\u7528\u8868\u60c5"},
+        {engine::SymbolCatalogMode::Greek,   L"\u5e0c\u814a\u5b57\u6bcd"},
+        {engine::SymbolCatalogMode::Symbols, L"\u7b26\u53f7\u5927\u5168"},
+    };
+    const float tabTop = shadowPad + 38.0f;
+    const float tabH = 26.0f;
+    const float tabGap = 8.0f;
+    const float tabW = (cardW - padX * 2.0f - tabGap * 3.0f) / 4.0f;
+    for (int t = 0; t < 4; ++t) {
+        float tl = shadowPad + padX + static_cast<float>(t) * (tabW + tabGap);
+        D2D1_RECT_F trc = D2D1::RectF(tl, tabTop, tl + tabW, tabTop + tabH);
+        const bool isCurTab = (state_.catalogMode == kTabs[t].mode) ||
+                              (state_.catalogMode == engine::SymbolCatalogMode::Menu && t == 0);
+        const int tabHitIdx = static_cast<int>(hitRegions_.size());
+        hitRegions_.push_back({trc, 3, static_cast<int>(kTabs[t].mode)});
+
+        if (isCurTab && activeCellBgBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(trc, pillR, pillR), activeCellBgBrush);
+            if (pillBorderBrush) {
+                dcTarget_->DrawRoundedRectangle(D2D1::RoundedRect(trc, pillR, pillR), pillBorderBrush, 1.0f);
+            }
+        } else if (hoverRegion_ == tabHitIdx && hoverPillBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(trc, pillR, pillR), hoverPillBrush);
+        }
+        ID2D1SolidColorBrush* tb = isCurTab ? (activeTextBrush ? activeTextBrush : textBrush) : (comBrush ? comBrush : textBrush);
+        if (tb) {
+            smallFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            dcTarget_->DrawText(kTabs[t].title, static_cast<UINT32>(wcslen(kTabs[t].title)), smallFmt_, trc, tb);
+            smallFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+    }
+
+    if (divBrush) {
+        dcTarget_->DrawLine(
+            D2D1::Point2F(shadowPad + padX, tabTop + tabH + 6.0f),
+            D2D1::Point2F(shadowPad + cardW - padX, tabTop + tabH + 6.0f),
+            divBrush, 1.0f);
+    }
+
+    // Body: Multi-row Multi-column Symbol Grid
+    const bool wideKaomoji = (state_.catalogMode == engine::SymbolCatalogMode::Kaomoji ||
+                              state_.catalogMode == engine::SymbolCatalogMode::Menu);
+    const int cols = wideKaomoji ? 3 : 6;
+    const int rows = wideKaomoji ? 5 : 4;
+    const float gridTop = tabTop + tabH + 12.0f;
+    const float gridBottom = shadowPad + cardH - 36.0f;
+    const float gap = 6.0f;
+    const float cellW = (cardW - padX * 2.0f - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+    const float cellH = (gridBottom - gridTop - gap * static_cast<float>(rows - 1)) / static_cast<float>(rows);
+
+    IDWriteTextFormat* bigSymFmt = nullptr;
+    if (dwFactory_) {
+        dwFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr,
+                                     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                     DWRITE_FONT_STRETCH_NORMAL, wideKaomoji ? 14.5f : 21.0f,
+                                     L"zh-CN", &bigSymFmt);
+        if (bigSymFmt) {
+            bigSymFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            bigSymFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            bigSymFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+    }
+
+    const size_t maxCells = std::min<size_t>(state_.items.size(), static_cast<size_t>(cols * rows));
+    for (size_t i = 0; i < maxCells; ++i) {
+        const int r = static_cast<int>(i) / cols;
+        const int c = static_cast<int>(i) % cols;
+        const float cx = shadowPad + padX + static_cast<float>(c) * (cellW + gap);
+        const float cy = gridTop + static_cast<float>(r) * (cellH + gap);
+        D2D1_RECT_F cellRc = D2D1::RectF(cx, cy, cx + cellW, cy + cellH);
+
+        const int hitIdx = static_cast<int>(hitRegions_.size());
+        hitRegions_.push_back({cellRc, 0, static_cast<int>(i)});
+
+        const bool isActive = (static_cast<int>(i) == state_.selectedIndex);
+        if (isActive && activeCellBgBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(cellRc, pillR, pillR), activeCellBgBrush);
+            if (pillBorderBrush) {
+                dcTarget_->DrawRoundedRectangle(D2D1::RoundedRect(cellRc, pillR, pillR), pillBorderBrush, 1.1f);
+            }
+        } else if (hoverRegion_ == hitIdx && hoverPillBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(cellRc, pillR, pillR), hoverPillBrush);
+        } else if (cellBgBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(cellRc, pillR, pillR), cellBgBrush);
+        }
+
+        std::string cleanLbl = state_.items[i].comment;
+        if (cleanLbl.size() >= 2 && cleanLbl.front() == '[' && cleanLbl.back() == ']') {
+            cleanLbl = cleanLbl.substr(1, cleanLbl.size() - 2);
+        }
+        std::wstring symW = utf8_to_utf16(state_.items[i].text);
+        std::wstring lblW = utf8_to_utf16(cleanLbl);
+
+        D2D1_RECT_F symRc = lblW.empty()
+            ? cellRc
+            : D2D1::RectF(cellRc.left + 3.0f, cellRc.top + 2.0f, cellRc.right - 3.0f, cellRc.top + cellH * 0.66f);
+        IDWriteTextFormat* useFmt = bigSymFmt ? bigSymFmt : textFmt_;
+        if (textBrush && useFmt) {
+            useFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            dcTarget_->DrawText(symW.c_str(), static_cast<UINT32>(symW.size()), useFmt, symRc,
+                                (isActive && activeTextBrush) ? activeTextBrush : textBrush,
+                                static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004));
+        }
+        if (!lblW.empty() && comBrush) {
+            D2D1_RECT_F lblRc = D2D1::RectF(cellRc.left + 3.0f, cellRc.top + cellH * 0.62f,
+                                            cellRc.right - 3.0f, cellRc.bottom - 2.0f);
+            indexFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            dcTarget_->DrawText(lblW.c_str(), static_cast<UINT32>(lblW.size()), indexFmt_, lblRc, comBrush);
+            indexFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+    }
+    if (bigSymFmt) bigSymFmt->Release();
+
+    // Footer: Keyboard hint + Pager (< 1/N >)
+    const float footerTop = shadowPad + cardH - 30.0f;
+    const float footerBot = shadowPad + cardH - 6.0f;
+    if (comBrush) {
+        const wchar_t* hint = L"\u70b9\u51fb\u76f4\u63a5\u4e0a\u5c4f \u00b7 \u2191\u2193\u2190\u2192/\u7a7a\u683c\u9009\u8bcd \u00b7 Tab\u5207\u5206\u7c7b";
+        D2D1_RECT_F hintRc = D2D1::RectF(shadowPad + padX, footerTop, shadowPad + cardW - 120.0f, footerBot);
+        dcTarget_->DrawText(hint, static_cast<UINT32>(wcslen(hint)), indexFmt_, hintRc, comBrush);
+    }
+    if (state_.totalPages > 1 && idxBrush) {
+        std::wstring pageInfoW = std::to_wstring(state_.page + 1) + L"/" + std::to_wstring(state_.totalPages);
+        float pageW = measureText(dwFactory_, indexFmt_, pageInfoW).width + 8.0f;
+        float nextLeft = shadowPad + cardW - padX - 20.0f;
+        float pageLeft = nextLeft - pageW;
+        float prevLeft = pageLeft - 20.0f;
+
+        D2D1_RECT_F prevRc = D2D1::RectF(prevLeft, footerTop, prevLeft + 20.0f, footerBot);
+        D2D1_RECT_F pgRc   = D2D1::RectF(pageLeft, footerTop, pageLeft + pageW, footerBot);
+        D2D1_RECT_F nextRc = D2D1::RectF(nextLeft, footerTop, nextLeft + 20.0f, footerBot);
+
+        const int prevHit = static_cast<int>(hitRegions_.size());
+        hitRegions_.push_back({prevRc, 1, 0});
+        const int nextHit = static_cast<int>(hitRegions_.size());
+        hitRegions_.push_back({nextRc, 2, 0});
+
+        if (hoverRegion_ == prevHit && hoverPillBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(prevRc, 4.0f, 4.0f), hoverPillBrush);
+        }
+        if (hoverRegion_ == nextHit && hoverPillBrush) {
+            dcTarget_->FillRoundedRectangle(D2D1::RoundedRect(nextRc, 4.0f, 4.0f), hoverPillBrush);
+        }
+        indexFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        dcTarget_->DrawText(L"\u2039", 1, indexFmt_, prevRc, (hoverRegion_ == prevHit && pyBrush) ? pyBrush : idxBrush);
+        dcTarget_->DrawText(pageInfoW.c_str(), static_cast<UINT32>(pageInfoW.size()), indexFmt_, pgRc, idxBrush);
+        dcTarget_->DrawText(L"\u203a", 1, indexFmt_, nextRc, (hoverRegion_ == nextHit && pyBrush) ? pyBrush : idxBrush);
+        indexFmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
+
+    dcTarget_->EndDraw();
+
+    if (activeCellBgBrush) activeCellBgBrush->Release();
+    if (cellBgBrush) cellBgBrush->Release();
+    if (hoverPillBrush) hoverPillBrush->Release();
+    if (cardBgBrush) cardBgBrush->Release();
+    if (borderBrush) borderBrush->Release();
+    if (innerBrush) innerBrush->Release();
+    if (divBrush) divBrush->Release();
+    if (pyBrush) pyBrush->Release();
+    if (textBrush) textBrush->Release();
+    if (activeTextBrush) activeTextBrush->Release();
+    if (pillBorderBrush) pillBorderBrush->Release();
+    if (accentBrush) accentBrush->Release();
+    if (idxBrush) idxBrush->Release();
+    if (comBrush) comBrush->Release();
+
+    presentCardSurface(screenDC, shadowPad, scale, pxW, pxH);
+    ReleaseDC(nullptr, screenDC);
+}
+
 void CandidateWindow::renderAndShow() {
+    if (state_.catalogMode != engine::SymbolCatalogMode::None) {
+        renderSymbolGrid();
+        return;
+    }
     ensureD2DResources();
     if (!hwnd_ || !dcTarget_ || !dwFactory_ || !textFmt_ || !smallFmt_ || !indexFmt_) return;
 
@@ -494,34 +839,7 @@ void CandidateWindow::renderAndShow() {
     if (badgeBgBrush) badgeBgBrush->Release();
     if (badgeTxtBrush) badgeTxtBrush->Release();
 
-    // Position near caret, clamped to the current monitor work area
-    POINT caretPt{state_.caretX, state_.caretY};
-    HMONITOR mon = MonitorFromPoint(caretPt, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi{};
-    mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(mon, &mi);
-
-    int padPx = static_cast<int>(std::round(shadowPad * scale));
-    const int clampedCaretH = std::clamp(state_.caretHeight, 12, 64);
-    int posX = state_.caretX - padPx;
-    int posY = state_.caretY + static_cast<int>(std::round(6.0f * scale)) - padPx;
-
-    if (posX + pxW > mi.rcWork.right) posX = mi.rcWork.right - pxW;
-    if (posX < mi.rcWork.left) posX = mi.rcWork.left;
-    if (posY + pxH > mi.rcWork.bottom) {
-        posY = state_.caretY - clampedCaretH - pxH + padPx - static_cast<int>(std::round(6.0f * scale));
-    }
-    if (posY + pxH > mi.rcWork.bottom) posY = mi.rcWork.bottom - pxH;
-    if (posY < mi.rcWork.top) posY = mi.rcWork.top;
-
-    POINT dstPt{posX, posY};
-    SIZE winSz{pxW, pxH};
-    POINT srcPt{0, 0};
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-
-    UpdateLayeredWindow(hwnd_, screenDC, &dstPt, &winSz, cardSurface_.dc(), &srcPt, 0, &blend, ULW_ALPHA);
-    SetWindowPos(hwnd_, HWND_TOPMOST, posX, posY, pxW, pxH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
+    presentCardSurface(screenDC, shadowPad, scale, pxW, pxH);
     ReleaseDC(nullptr, screenDC);
 }
 
@@ -597,12 +915,16 @@ LRESULT CandidateWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             for (const auto& hr : hitRegions_) {
                 if (x >= hr.rect.left && x <= hr.rect.right && y >= hr.rect.top && y <= hr.rect.bottom) {
                     if (!hostHwnd_) break;
-                    if (hr.actionType == 0 && hr.index >= 0 && hr.index < 9) {
+                    if (hr.actionType == 0 && hr.index >= 0 && hr.index < static_cast<int>(state_.items.size())) {
                         PostMessageW(hostHwnd_, WM_APP_CANDIDATE_CLICK, static_cast<WPARAM>(hr.index), 0);
                     } else if (hr.actionType == 1) {
                         PostMessageW(hostHwnd_, WM_APP_CANDIDATE_PAGE, 0, 0);
                     } else if (hr.actionType == 2) {
                         PostMessageW(hostHwnd_, WM_APP_CANDIDATE_PAGE, 1, 0);
+                    } else if (hr.actionType == 3) {
+                        PostMessageW(hostHwnd_, WM_APP_SWITCH_SYMBOL_TAB, static_cast<WPARAM>(hr.index), 0);
+                    } else if (hr.actionType == 4) {
+                        PostMessageW(hostHwnd_, WM_APP_OPEN_CUSTOM_KAOMOJI, 0, 0);
                     }
                     break;
                 }

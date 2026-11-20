@@ -326,6 +326,9 @@ void TrayIcon::showContextMenu(const EngineConfig& cfg) {
     AppendMenuW(menu, MF_STRING,
                 static_cast<UINT_PTR>(HostAction::OpenQuickInputManager),
                 L"\u7ba1\u7406\u300c\u5feb\u8f93\u5165 (vvv)\u300d...");
+    AppendMenuW(menu, MF_STRING,
+                static_cast<UINT_PTR>(HostAction::OpenCustomKaomojiManager),
+                L"\u7ba1\u7406\u81ea\u5b9a\u4e49\u989c\u6587\u5b57 (vvvv)...");
 
     AppendMenuW(menu, MF_STRING | (cfg.showStatusBar ? MF_CHECKED : 0),
                 static_cast<UINT_PTR>(HostAction::ToggleStatusBar),

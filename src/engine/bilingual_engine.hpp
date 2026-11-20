@@ -93,6 +93,9 @@ public:
         return !rawBuffer_.empty() || !committedPrefixWords_.empty() ||
                catalogMode_ != SymbolCatalogMode::None;
     }
+    SymbolCatalogMode catalogMode() const { return catalogMode_; }
+    void setCatalogMode(SymbolCatalogMode mode);
+    int effectivePageSize() const;
     int currentPage() const { return currentPage_; }
     int totalPages() const;
     int selectedIndexInPage() const { return selectedInPage_; }

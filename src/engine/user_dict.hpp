@@ -28,6 +28,12 @@ struct QuickInputItem {
     std::string value;
 };
 
+struct CustomKaomojiItem {
+    std::string text;     // e.g. "(*˘ ³˘)♥"
+    std::string label;    // e.g. "亲亲"
+    std::string keywords; // e.g. "qinqin|qq|memeda"
+};
+
 class UserDict {
 public:
     bool load(const std::filesystem::path& path);
@@ -80,6 +86,14 @@ public:
     bool loadQuickInputs(const std::filesystem::path& path);
     bool saveQuickInputs() const;
 
+    // Extensible custom kaomoji library stored in custom_kaomoji.tsv (hot-reloaded on change).
+    const std::vector<CustomKaomojiItem>& customKaomojis() const { return customKaomojis_; }
+    bool setCustomKaomojis(std::vector<CustomKaomojiItem> items);
+    bool loadCustomKaomojis(const std::filesystem::path& path);
+    bool reloadCustomKaomojisIfChanged();
+    bool saveCustomKaomojis() const;
+    std::filesystem::path customKaomojisPath() const;
+
     std::filesystem::path pinsPath() const;
     std::filesystem::path quickInputsPath() const;
     std::filesystem::path configPath() const;
@@ -98,6 +112,9 @@ private:
     std::unordered_map<std::string, std::vector<PinnedEntry>> pins_;
     std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> bigrams_;
     std::vector<QuickInputItem> quickInputs_;
+    std::vector<CustomKaomojiItem> customKaomojis_;
+    std::filesystem::file_time_type customKaomojisMtime_{};
+    bool hasCustomKaomojisMtime_ = false;
 };
 
 } // namespace liteime::engine

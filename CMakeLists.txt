@@ -84,6 +84,7 @@ if(NOT LITEIME_TSF_ONLY)
         src/host/status_window.cpp
         src/host/tray_icon.cpp
         src/host/quick_input_dialog.cpp
+        src/host/custom_kaomoji_dialog.cpp
         src/host/settings_dialog.cpp
         src/host/liteime_host.rc
     )

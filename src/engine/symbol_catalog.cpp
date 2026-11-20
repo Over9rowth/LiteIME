@@ -82,7 +82,7 @@ const std::vector<SymbolEntry>& SymbolCatalog::allEntries() {
         {"(ง •̀_•́)ง",    "[加油]",   "jiayou",                 "jy|chongya|nuli|fight",     SymbolLibrary::Kaomoji, 3},
         {"٩(˃̶͈̀௰˂̶͈́)و",   "[冲鸭]",   "chongya",                "jiayou|cy|happy|fight",     SymbolLibrary::Kaomoji, 3},
         {"(๑•̀ㅂ•́)و✧",   "[点赞]",   "dianzan|bangbang",       "zan|bang|nb|good",          SymbolLibrary::Kaomoji, 3},
-        {"(づ｡◕‿‿◕｡)づ", "[抱抱]",   "baobao|qinqin",          "bb|qq|aixin|hug",           SymbolLibrary::Kaomoji, 3},
+        {"(づ｡◕‿‿◕｡)づ", "[抱抱]",   "baobao",                 "bb|aixin|hug",              SymbolLibrary::Kaomoji, 3},
         {"(｡･ω･｡)ﾉ♡",    "[比心]",   "bixin",                  "bx|xiexie|ganxie|love",     SymbolLibrary::Kaomoji, 3},
         {"( ^_^)/~~",    "[再见]",   "zaijian|baibai",         "zj|bb|bye",                 SymbolLibrary::Kaomoji, 3},
         {"(－_－) zzZ",   "[困了]",   "kunle|keshui",           "kl|shuijiao|sj|sleep",      SymbolLibrary::Kaomoji, 3},
@@ -329,6 +329,90 @@ std::vector<const SymbolEntry*> SymbolCatalog::queryLibrary(SymbolLibrary lib,
     out.reserve(ranked.size());
     for (const auto& r : ranked) {
         out.push_back(r.entry);
+    }
+    return out;
+}
+
+std::vector<std::string> SymbolCatalog::matchCustomInline(
+    std::string_view concatPinyin,
+    const std::vector<CustomKaomojiItem>& customKaomojis) {
+    if (concatPinyin.empty() || customKaomojis.empty()) return {};
+    const std::string lower = detail::toLowerAscii(concatPinyin);
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    for (const auto& item : customKaomojis) {
+        if (item.text.empty() || item.keywords.empty()) continue;
+        std::string_view kws(item.keywords);
+        size_t pos = 0;
+        bool matched = false;
+        while (pos < kws.size()) {
+            size_t next = kws.find('|', pos);
+            if (next == std::string_view::npos) next = kws.size();
+            const std::string tok = detail::toLowerAscii(kws.substr(pos, next - pos));
+            // Require >= 3 chars for custom inline trigger unless full keyword matches cleanly (avoid short partial hijack)
+            if (tok == lower && tok.size() >= 3) {
+                matched = true;
+                break;
+            }
+            pos = next + 1;
+        }
+        if (matched && seen.insert(item.text).second) {
+            out.push_back(item.text);
+        }
+    }
+    return out;
+}
+
+std::vector<CatalogDisplayEntry> SymbolCatalog::queryCatalog(
+    SymbolLibrary lib,
+    std::string_view query,
+    const std::vector<CustomKaomojiItem>& customKaomojis,
+    bool filterByLibrary) {
+    const std::string lower = detail::toLowerAscii(query);
+    std::vector<CatalogDisplayEntry> out;
+    std::unordered_set<std::string> seenText;
+
+    if ((!filterByLibrary || lib == SymbolLibrary::Kaomoji) && !customKaomojis.empty()) {
+        struct RankedCustom {
+            const CustomKaomojiItem* item = nullptr;
+            int score = 0;
+            size_t order = 0;
+        };
+        std::vector<RankedCustom> rankedCustom;
+        for (size_t i = 0; i < customKaomojis.size(); ++i) {
+            const auto& ck = customKaomojis[i];
+            if (ck.text.empty()) continue;
+            int sc = 1;
+            if (!lower.empty()) {
+                sc = std::max(scorePipeList(ck.keywords.c_str(), lower),
+                              scorePipeList(ck.label.c_str(), lower));
+                if (sc == 0 && !ck.label.empty() &&
+                    detail::toLowerAscii(ck.label).find(lower) != std::string::npos) {
+                    sc = 50;
+                }
+            }
+            if (sc > 0) {
+                rankedCustom.push_back(RankedCustom{&ck, sc, i});
+            }
+        }
+        std::sort(rankedCustom.begin(), rankedCustom.end(), [](const RankedCustom& a, const RankedCustom& b) {
+            if (a.score != b.score) return a.score > b.score;
+            return a.order < b.order;
+        });
+        for (const auto& rc : rankedCustom) {
+            if (seenText.insert(rc.item->text).second) {
+                std::string lbl = rc.item->label.empty()
+                    ? "[自定义]"
+                    : ("[" + rc.item->label + "]");
+                out.push_back(CatalogDisplayEntry{rc.item->text, std::move(lbl), true});
+            }
+        }
+    }
+
+    for (const auto* e : queryLibrary(lib, query, filterByLibrary)) {
+        if (seenText.insert(e->text).second) {
+            out.push_back(CatalogDisplayEntry{e->text, e->label ? e->label : "", false});
+        }
     }
     return out;
 }

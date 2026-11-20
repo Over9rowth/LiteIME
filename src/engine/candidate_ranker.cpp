@@ -14,72 +14,48 @@ void BilingualEngine::rebuildCandidates() {
     currentPage_ = 0;
     selectedInPage_ = 0;
 
-    // -1. "vvvv" 4-tap Symbol / Kaomoji / Emoji / Greek browser + live keyword filter
+    // -1. "vvvv" 4-tap Symbol / Kaomoji / Emoji / Greek Grid Panel + live keyword filter
     if (catalogMode_ != SymbolCatalogMode::None) {
-        if (catalogMode_ == SymbolCatalogMode::Menu && rawBuffer_.empty()) {
-            segmentedHeader_ = "vvvv [符号百科 · 1~4选库或打字筛选]";
-            struct MenuRow {
-                const char* text;
-                const char* comment;
-                const char* key;
-            };
-            static constexpr MenuRow kMenus[] = {
-                {"颜文字库",   "[情绪表情 (*^▽^*)]", "kaomoji"},
-                {"常用表情库", "[Emoji 😊👍❤️]",     "emoji"},
-                {"希腊字母库", "[α-Ω 数学/物理]",     "greek"},
-                {"符号大全库", "[序号/标点/箭头]",    "symbols"},
-            };
-            for (size_t i = 0; i < std::size(kMenus); ++i) {
-                CandidateItem ci;
-                ci.text = kMenus[i].text;
-                ci.comment = kMenus[i].comment;
-                ci.matchedKey = kMenus[i].key;
-                ci.score = 1000.0 - static_cast<double>(i);
-                ci.kind = CandidateKind::SymbolMenuEntry;
-                candidates_.push_back(std::move(ci));
-            }
-            return;
-        }
-
         SymbolLibrary targetLib = SymbolLibrary::Kaomoji;
-        bool filterByLib = true;
-        const char* libPrefix = "vvvv [全局筛选]";
+        const char* libPrefix = "[颜文字]";
         switch (catalogMode_) {
-            case SymbolCatalogMode::Menu:
-                filterByLib = false;
-                libPrefix = "vvvv [全局筛选]";
-                break;
-            case SymbolCatalogMode::Kaomoji:
-                targetLib = SymbolLibrary::Kaomoji;
-                libPrefix = "[颜文字库]";
-                break;
             case SymbolCatalogMode::Emoji:
                 targetLib = SymbolLibrary::Emoji;
-                libPrefix = "[常用表情库]";
+                libPrefix = "[常用表情]";
                 break;
             case SymbolCatalogMode::Greek:
                 targetLib = SymbolLibrary::Greek;
-                libPrefix = "[希腊字母库]";
+                libPrefix = "[希腊字母]";
                 break;
             case SymbolCatalogMode::Symbols:
                 targetLib = SymbolLibrary::Symbol;
-                libPrefix = "[符号大全库]";
+                libPrefix = "[符号大全]";
                 break;
+            case SymbolCatalogMode::Kaomoji:
+            case SymbolCatalogMode::Menu:
             default:
+                targetLib = SymbolLibrary::Kaomoji;
+                libPrefix = "[颜文字]";
                 break;
         }
         if (rawBuffer_.empty()) {
-            segmentedHeader_ = std::string(libPrefix) + " · 打字筛选 / Backspace返回";
+            segmentedHeader_ = std::string(libPrefix) + " 打字筛选 · Tab切分类 · Esc关闭";
         } else {
-            segmentedHeader_ = std::string(libPrefix) + " " + rawBuffer_;
+            segmentedHeader_ = std::string(libPrefix) + " 筛选: " + rawBuffer_;
         }
 
-        const auto hits = SymbolCatalog::queryLibrary(targetLib, rawBuffer_, filterByLib);
+        auto hits = SymbolCatalog::queryCatalog(targetLib, rawBuffer_, userDict_.customKaomojis(), true);
+        if (hits.empty() && !rawBuffer_.empty()) {
+            hits = SymbolCatalog::queryCatalog(targetLib, rawBuffer_, userDict_.customKaomojis(), false);
+            if (!hits.empty()) {
+                segmentedHeader_ = "[全局匹配] 筛选: " + rawBuffer_;
+            }
+        }
         for (size_t i = 0; i < hits.size(); ++i) {
             CandidateItem ci;
-            ci.text = hits[i]->text;
-            ci.comment = hits[i]->label ? hits[i]->label : "";
-            ci.commitText = hits[i]->text;
+            ci.text = hits[i].text;
+            ci.comment = hits[i].label;
+            ci.commitText = hits[i].text;
             ci.consumedRawChars = rawBuffer_.size();
             ci.score = 1000.0 - static_cast<double>(i);
             ci.kind = CandidateKind::SymbolLiteral;
@@ -899,20 +875,28 @@ void BilingualEngine::rebuildCandidates() {
                 if (c != '\'') inlineKey.push_back(c);
             }
         }
+        const auto customHits = SymbolCatalog::matchCustomInline(inlineKey, userDict_.customKaomojis());
         const auto symHits = SymbolCatalog::matchInline(inlineKey);
-        for (const auto& hit : symHits) {
+        auto insertInlineAt = [&](const std::string& symText, int preferredSlot) {
             bool alreadyPresent = std::any_of(candidates_.begin(), candidates_.end(), [&](const CandidateItem& c) {
-                return c.text == hit.entry->text;
+                return c.text == symText;
             });
-            if (alreadyPresent) continue;
+            if (alreadyPresent) return;
             CandidateItem sci;
-            sci.text = hit.entry->text;
-            sci.commitText = hit.entry->text;
+            sci.text = symText;
+            sci.commitText = symText;
             sci.consumedRawChars = rawBuffer_.size();
             sci.kind = CandidateKind::SymbolLiteral;
             sci.score = 100.0;
-            size_t pos = std::min<size_t>(static_cast<size_t>(std::max(0, hit.preferredSlot)), candidates_.size());
+            size_t pos = std::min<size_t>(static_cast<size_t>(std::max(0, preferredSlot)), candidates_.size());
             candidates_.insert(candidates_.begin() + static_cast<std::ptrdiff_t>(pos), std::move(sci));
+        };
+        for (const auto& hit : symHits) {
+            insertInlineAt(hit.entry->text, hit.preferredSlot);
+        }
+        // Custom user kaomoji (e.g. qinqin/tietie/cengceng) place cleanly at 4th/5th visible slot
+        if (!customHits.empty()) {
+            insertInlineAt(customHits[0], 3);
         }
     }
 

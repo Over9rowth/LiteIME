@@ -7,6 +7,7 @@
 #include "host/host_messages.hpp"
 #include "host/pipe_server.hpp"
 #include "host/quick_input_dialog.hpp"
+#include "host/custom_kaomoji_dialog.hpp"
 #include "host/settings_dialog.hpp"
 #include "host/status_window.hpp"
 #include "host/tray_icon.hpp"
@@ -279,6 +280,7 @@ struct HostApp {
                 vs.skin = cfgSnap.skin;
                 vs.layout = cfgSnap.layout;
                 vs.squareFrame = cfgSnap.squareFrame;
+                vs.catalogMode = engine.catalogMode();
                 vs.caretX = lastCaretX;
                 vs.caretY = lastCaretY;
                 vs.caretHeight = lastCaretH;
@@ -535,6 +537,12 @@ struct HostApp {
         if (action == liteime::host::HostAction::OpenQuickInputManager) {
             if (msgHwnd) {
                 PostMessageW(msgHwnd, liteime::host::WM_APP_OPEN_QUICK_INPUT, 0, 0);
+            }
+            return;
+        }
+        if (action == liteime::host::HostAction::OpenCustomKaomojiManager) {
+            if (msgHwnd) {
+                PostMessageW(msgHwnd, liteime::host::WM_APP_OPEN_CUSTOM_KAOMOJI, 0, 0);
             }
             return;
         }
@@ -843,6 +851,7 @@ LRESULT CALLBACK hostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (wParam == kTimerFlushUserDict) {
                 std::lock_guard<std::mutex> lock(app->stateMutex);
                 app->engine.userDict().saveIfDirty();
+                app->engine.userDict().reloadCustomKaomojisIfChanged();
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -865,6 +874,46 @@ LRESULT CALLBACK hostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 std::lock_guard<std::mutex> lock(app->stateMutex);
                 app->engine.userDict().setQuickInputs(std::move(items));
                 app->engine.userDict().saveQuickInputs();
+            }
+            return 0;
+        }
+        case liteime::host::WM_APP_SWITCH_SYMBOL_TAB: {
+            const auto nextTab = static_cast<liteime::engine::SymbolCatalogMode>(wParam);
+            {
+                std::lock_guard<std::mutex> lock(app->stateMutex);
+                app->engine.setCatalogMode(nextTab);
+                const bool composing = app->engine.isComposing();
+                app->shouldShowCandidates = composing && !app->engine.allCandidates().empty();
+            }
+            app->syncUiFromState();
+            return 0;
+        }
+        case liteime::host::WM_APP_OPEN_CUSTOM_KAOMOJI: {
+            std::vector<liteime::engine::CustomKaomojiItem> items;
+            fs::path filePath;
+            {
+                std::lock_guard<std::mutex> lock(app->stateMutex);
+                app->engine.userDict().reloadCustomKaomojisIfChanged();
+                items = app->engine.userDict().customKaomojis();
+                filePath = app->engine.userDict().customKaomojisPath();
+            }
+            if (liteime::host::editCustomKaomojiItems(nullptr, items, filePath)) {
+                bool needSync = false;
+                {
+                    std::lock_guard<std::mutex> lock(app->stateMutex);
+                    app->engine.userDict().setCustomKaomojis(std::move(items));
+                    app->engine.userDict().saveCustomKaomojis();
+                    if (app->engine.isComposing()) {
+                        const auto curMode = app->engine.catalogMode();
+                        if (curMode != liteime::engine::SymbolCatalogMode::None) {
+                            app->engine.setCatalogMode(curMode);
+                        }
+                        needSync = true;
+                    }
+                }
+                if (needSync) {
+                    app->syncUiFromState();
+                }
             }
             return 0;
         }

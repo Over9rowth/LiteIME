@@ -155,15 +155,44 @@ void BilingualEngine::notifyFocusChanged(bool gained) {
     lastCommittedQuoteKind_ = 0;
 }
 
+int BilingualEngine::effectivePageSize() const {
+    switch (catalogMode_) {
+        case SymbolCatalogMode::Kaomoji:
+            return 15; // 3 cols x 5 rows wide cards for kaomoji
+        case SymbolCatalogMode::Emoji:
+        case SymbolCatalogMode::Greek:
+        case SymbolCatalogMode::Symbols:
+        case SymbolCatalogMode::Menu:
+            return 24; // 6 cols x 4 rows compact grid cells
+        default:
+            return std::clamp(config_.pageSize, 3, 9);
+    }
+}
+
+void BilingualEngine::setCatalogMode(SymbolCatalogMode mode) {
+    if (mode == SymbolCatalogMode::None) {
+        resetComposition();
+        return;
+    }
+    if (mode == SymbolCatalogMode::Menu) {
+        mode = SymbolCatalogMode::Kaomoji;
+    }
+    userDict_.reloadCustomKaomojisIfChanged();
+    catalogMode_ = mode;
+    currentPage_ = 0;
+    selectedInPage_ = 0;
+    rebuildCandidates();
+}
+
 int BilingualEngine::totalPages() const {
     if (candidates_.empty()) return 0;
-    int ps = std::clamp(config_.pageSize, 3, 9);
+    int ps = effectivePageSize();
     return static_cast<int>((candidates_.size() + ps - 1) / ps);
 }
 
 std::vector<CandidateItem> BilingualEngine::currentPageItems() const {
     if (candidates_.empty()) return {};
-    int ps = std::clamp(config_.pageSize, 3, 9);
+    int ps = effectivePageSize();
     size_t start = static_cast<size_t>(currentPage_) * ps;
     if (start >= candidates_.size()) return {};
     size_t end = std::min(candidates_.size(), start + ps);
@@ -239,7 +268,7 @@ KeyActionResult BilingualEngine::prevPage() {
 }
 
 KeyActionResult BilingualEngine::selectCandidateOnPage(int indexInPage) {
-    int ps = std::clamp(config_.pageSize, 3, 9);
+    int ps = effectivePageSize();
     size_t globalIdx = static_cast<size_t>(currentPage_) * ps + static_cast<size_t>(indexInPage);
     if (indexInPage < 0 || indexInPage >= ps || globalIdx >= candidates_.size()) {
         return {};
@@ -248,7 +277,7 @@ KeyActionResult BilingualEngine::selectCandidateOnPage(int indexInPage) {
 }
 
 bool BilingualEngine::pinCandidateOnPage(int indexInPage, int slot0To4) {
-    int ps = std::clamp(config_.pageSize, 3, 9);
+    int ps = effectivePageSize();
     size_t globalIdx = static_cast<size_t>(currentPage_) * ps + static_cast<size_t>(indexInPage);
     if (rawBuffer_.empty() || indexInPage < 0 || indexInPage >= ps || globalIdx >= candidates_.size()) {
         return false;
@@ -266,7 +295,7 @@ bool BilingualEngine::pinCandidateOnPage(int indexInPage, int slot0To4) {
 }
 
 bool BilingualEngine::unpinCandidateOnPage(int indexInPage) {
-    int ps = std::clamp(config_.pageSize, 3, 9);
+    int ps = effectivePageSize();
     size_t globalIdx = static_cast<size_t>(currentPage_) * ps + static_cast<size_t>(indexInPage);
     if (rawBuffer_.empty() || indexInPage < 0 || indexInPage >= ps || globalIdx >= candidates_.size()) {
         return false;
@@ -280,7 +309,7 @@ bool BilingualEngine::unpinCandidateOnPage(int indexInPage) {
 }
 
 bool BilingualEngine::removeUserWordOnPage(int indexInPage) {
-    int ps = std::clamp(config_.pageSize, 3, 9);
+    int ps = effectivePageSize();
     size_t globalIdx = static_cast<size_t>(currentPage_) * ps + static_cast<size_t>(indexInPage);
     if (indexInPage < 0 || indexInPage >= ps || globalIdx >= candidates_.size()) {
         return false;
@@ -620,7 +649,8 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             if (rawBuffer_.size() < maxBuf) {
                 rawBuffer_.push_back(ch);
                 if (!urlMode_ && detail::toLowerAscii(rawBuffer_) == "vvvv") {
-                    catalogMode_ = SymbolCatalogMode::Menu;
+                    userDict_.reloadCustomKaomojisIfChanged();
+                    catalogMode_ = SymbolCatalogMode::Kaomoji;
                     rawBuffer_.clear();
                     rebuildCandidates();
                     return buildComposeResult();
@@ -711,11 +741,6 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
                     rebuildCandidates();
                     return buildComposeResult();
                 }
-                if (catalogMode_ != SymbolCatalogMode::Menu) {
-                    catalogMode_ = SymbolCatalogMode::Menu;
-                    rebuildCandidates();
-                    return buildComposeResult();
-                }
                 resetComposition();
                 res.consumed = true;
                 res.showCandidates = false;
@@ -742,9 +767,24 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             return buildComposeResult();
         }
 
-        // Tab / Shift+Tab while composing: cycle pages (or candidate selection on single page)
+        // Tab / Shift+Tab while composing: switch category in vvvv grid, or cycle pages in normal mode
         if (vk == kVkTab) {
             if (testOnly) { res.consumed = true; return res; }
+            if (catalogMode_ != SymbolCatalogMode::None) {
+                static constexpr SymbolCatalogMode kTabs[] = {
+                    SymbolCatalogMode::Kaomoji,
+                    SymbolCatalogMode::Emoji,
+                    SymbolCatalogMode::Greek,
+                    SymbolCatalogMode::Symbols,
+                };
+                int curTab = 0;
+                for (int t = 0; t < 4; ++t) {
+                    if (kTabs[t] == catalogMode_) { curTab = t; break; }
+                }
+                int nextTab = shift ? ((curTab + 3) % 4) : ((curTab + 1) % 4);
+                setCatalogMode(kTabs[nextTab]);
+                return buildComposeResult();
+            }
             const int tp = totalPages();
             if (tp > 1) {
                 if (shift) {
@@ -802,8 +842,8 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         // Number keys 1..9 select candidate on current page
         if (!shift && vk >= '1' && vk <= '9') {
             int idx = static_cast<int>(vk - '1');
-            int ps = std::clamp(config_.pageSize, 3, 9);
-            if (idx < ps && static_cast<size_t>(currentPage_) * ps + idx < candidates_.size()) {
+            int ps = std::min(effectivePageSize(), 9);
+            if (idx < ps && static_cast<size_t>(currentPage_) * effectivePageSize() + idx < candidates_.size()) {
                 if (testOnly) { res.consumed = true; return res; }
                 return selectCandidateOnPage(idx);
             }
@@ -819,7 +859,43 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             return prevPage();
         }
 
-        // Arrow navigation among candidates on page
+        // Arrow navigation among candidates / 2D symbol grid
+        if (catalogMode_ != SymbolCatalogMode::None &&
+            (vk == kVkRight || vk == kVkLeft || vk == kVkDown || vk == kVkUp)) {
+            if (testOnly) { res.consumed = true; return res; }
+            auto page = currentPageItems();
+            const int cols = (catalogMode_ == SymbolCatalogMode::Kaomoji) ? 3 : 6;
+            const int pageLen = static_cast<int>(page.size());
+            if (pageLen == 0) return buildComposeResult();
+            if (vk == kVkRight) {
+                if (selectedInPage_ + 1 < pageLen) {
+                    ++selectedInPage_;
+                    return buildComposeResult();
+                }
+                return nextPage();
+            }
+            if (vk == kVkLeft) {
+                if (selectedInPage_ > 0) {
+                    --selectedInPage_;
+                    return buildComposeResult();
+                }
+                return prevPage();
+            }
+            if (vk == kVkDown) {
+                if (selectedInPage_ + cols < pageLen) {
+                    selectedInPage_ += cols;
+                    return buildComposeResult();
+                }
+                return nextPage();
+            }
+            if (vk == kVkUp) {
+                if (selectedInPage_ - cols >= 0) {
+                    selectedInPage_ -= cols;
+                    return buildComposeResult();
+                }
+                return prevPage();
+            }
+        }
         if (vk == kVkRight || vk == kVkDown) {
             if (testOnly) { res.consumed = true; return res; }
             auto page = currentPageItems();

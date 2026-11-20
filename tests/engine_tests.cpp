@@ -1825,58 +1825,82 @@ int wmain() {
             CHECK(afItems.size() >= 5 && afItems[4].text == "α");
             symEng.handleKey(0x1B, 0, false);
 
-            // 2. "vvvv" 4-tap menu -> enter Kaomoji (1) -> filter "kx" -> Space commit
-            typeWord(symEng, "vvvv");
-            CHECK(symEng.isComposing());
-            auto menuItems = symEng.currentPageItems();
-            CHECK(menuItems.size() == 4);
-            CHECK(menuItems[0].text == "颜文字库");
-            CHECK(menuItems[1].text == "常用表情库");
-            CHECK(menuItems[2].text == "希腊字母库");
-            CHECK(menuItems[3].text == "符号大全库");
+            // 2. "vvvv" direct 4-tap Grid Panel (starts in Kaomoji with custom extensible defaults)
+            const std::filesystem::path symUserPath = tmpDir / "sym_user.tsv";
+            std::filesystem::remove(symUserPath);
+            std::filesystem::remove(tmpDir / "custom_kaomoji.tsv");
+            symEng.userDict().load(symUserPath);
+            CHECK(!symEng.userDict().customKaomojis().empty());
 
-            auto enterKaomoji = symEng.handleKey('1', 0, false);
-            CHECK(enterKaomoji.consumed && enterKaomoji.commitText.empty() && enterKaomoji.showCandidates);
-            CHECK(symEng.isComposing());
+            typeWord(symEng, "vvvv");
+            CHECK(symEng.isComposing() && symEng.catalogMode() == SymbolCatalogMode::Kaomoji);
+            auto kmPage1 = symEng.currentPageItems();
+            CHECK(kmPage1.size() == 15);
+            // Default starter kaomoji appear first inside Kaomoji tab
+            CHECK(kmPage1[0].text == "(*^▽^*)");
+
+            // 2D grid navigation: Down arrow moves by +3 columns in Kaomoji (0 -> 3)
+            CHECK(symEng.handleKey(0x28 /*VK_DOWN*/, 0, false).consumed);
+            CHECK(symEng.selectedIndexInPage() == 3);
+
+            // Filter by "kx" inside Kaomoji -> Space commit
             typeWord(symEng, "kx");
             auto kmHits = symEng.currentPageItems();
             CHECK(!kmHits.empty() && kmHits[0].text == "(*^▽^*)");
             auto pickKm = symEng.handleKey(0x20, 0, false);
             CHECK(pickKm.consumed && pickKm.commitText == "(*^▽^*)" && !symEng.isComposing());
 
-            // 3. "vvvv" -> enter Emoji (2) -> filter "zan" -> Enter commit "👍"
+            // 3. "vvvv" -> Tab switches to Emoji (24 per page) -> filter "zan" -> Enter commit "👍"
             typeWord(symEng, "vvvv");
-            CHECK(symEng.handleKey('2', 0, false).showCandidates);
+            CHECK(symEng.handleKey(0x09 /*VK_TAB*/, 0, false).showCandidates);
+            CHECK(symEng.catalogMode() == SymbolCatalogMode::Emoji);
+            CHECK(symEng.currentPageItems().size() == 24);
             typeWord(symEng, "zan");
             auto emHits = symEng.currentPageItems();
             CHECK(!emHits.empty() && emHits[0].text == "👍");
             auto pickEm = symEng.handleKey(0x0D, 0, false);
             CHECK(pickEm.consumed && pickEm.commitText == "👍" && !symEng.isComposing());
 
-            // 4. "vvvv" -> enter Greek (3) -> filter "omega" -> verify "ω" & Backspace back to Menu -> exit
+            // 4. "vvvv" -> Tab x2 to Greek -> filter "omega" -> "ω", Backspace clears filter & exits
             typeWord(symEng, "vvvv");
-            CHECK(symEng.handleKey('3', 0, false).showCandidates);
+            CHECK(symEng.handleKey(0x09, 0, false).showCandidates); // Emoji
+            CHECK(symEng.handleKey(0x09, 0, false).showCandidates); // Greek
+            CHECK(symEng.catalogMode() == SymbolCatalogMode::Greek);
             typeWord(symEng, "omega");
             auto grHits = symEng.currentPageItems();
             CHECK(!grHits.empty() && grHits[0].text == "ω");
-            // Erase "omega" back to Greek root, then Backspace returns to 4-item Menu
             for (int k = 0; k < 5; ++k) {
                 CHECK(symEng.handleKey(0x08, 0, false).showCandidates);
             }
-            CHECK(symEng.currentPageItems().size() == 5 || symEng.currentPageItems().size() == 6); // All Greek
-            auto backToMenu = symEng.handleKey(0x08, 0, false);
-            CHECK(backToMenu.consumed && backToMenu.showCandidates);
-            CHECK(symEng.currentPageItems().size() == 4 && symEng.currentPageItems()[0].text == "颜文字库");
-            auto exitMenu = symEng.handleKey(0x08, 0, false);
-            CHECK(exitMenu.consumed && !exitMenu.showCandidates && !symEng.isComposing());
+            CHECK(symEng.rawBuffer().empty() && symEng.currentPageItems().size() == 24);
+            auto exitGrid = symEng.handleKey(0x08, 0, false);
+            CHECK(exitGrid.consumed && !exitGrid.showCandidates && !symEng.isComposing());
 
-            // 5. "vvvv" -> global filter without selecting sub-library ("dunhao" -> "、")
+            // 5. "vvvv" auto-cross-library fallback on query ("dunhao" while on Kaomoji -> "、")
             typeWord(symEng, "vvvv");
             typeWord(symEng, "dunhao");
             auto symHits = symEng.currentPageItems();
             CHECK(!symHits.empty() && symHits[0].text == "、");
             auto pickSym = symEng.handleKey('1', 0, false);
             CHECK(pickSym.consumed && pickSym.commitText == "、");
+
+            // 6. Custom extensible kaomoji hot-reload + inline trigger ("huanhux")
+            {
+                std::ofstream ckOfs(tmpDir / "custom_kaomoji.tsv", std::ios::app);
+                ckOfs << "(/≧▽≦)/♡\t欢呼\thuanhux\n";
+            }
+            // Bump mtime slightly or reload via vvvv entry
+            auto customList = symEng.userDict().customKaomojis();
+            customList.insert(customList.begin(), CustomKaomojiItem{"(/≧▽≦)/♡", "欢呼", "huanhux"});
+            symEng.userDict().setCustomKaomojis(std::move(customList));
+            CHECK(symEng.userDict().saveCustomKaomojis());
+            typeWord(symEng, "huanhux");
+            bool foundCustomInline = false;
+            for (const auto& c : symEng.currentPageItems()) {
+                if (c.text == "(/≧▽≦)/♡") { foundCustomInline = true; break; }
+            }
+            CHECK(foundCustomInline);
+            symEng.handleKey(0x1B, 0, false);
         }
 
         // Production 552k dict end-to-end check (read-only): mixed sentence, partial-prefix non-regression, & inline symbols

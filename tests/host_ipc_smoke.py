@@ -372,7 +372,7 @@ def main() -> int:
         assert send_ipc(pipe, 2, ord("5"), 0, 0)["commit"] == "α"
         for ch in "VVVV":
             assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
-        assert send_ipc(pipe, 2, ord("2"), 0, 0)["is_composing"]  # Enter Emoji library
+        assert send_ipc(pipe, 2, 0x09, 0, 0)["is_composing"]  # Tab -> Emoji library
         for ch in "ZAN":
             assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
         assert send_ipc(pipe, 2, 0x20, 0, 0)["commit"] == "👍"

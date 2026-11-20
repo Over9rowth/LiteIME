@@ -115,6 +115,36 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SendMessageW(candWin.hwnd(), WM_MOUSELEAVE, 0, 0);
     CHECK(IsWindowVisible(candWin.hwnd()) != FALSE);
 
+    // Exercise 4-tap "vvvv" Big Grid Symbol Panel across Kaomoji (15) & Emoji (24) tabs
+    {
+        liteime::engine::BilingualEngine gridEng;
+        gridEng.setDictionary(&dict);
+        for (int i = 0; i < 4; ++i) {
+            gridEng.handleKey('V', 0, false);
+        }
+        liteime::host::CandidateViewState gridVs;
+        gridVs.visible = true;
+        gridVs.headerBuffer = gridEng.segmentedHeader();
+        gridVs.items = gridEng.currentPageItems();
+        gridVs.selectedIndex = 0;
+        gridVs.page = gridEng.currentPage();
+        gridVs.totalPages = gridEng.totalPages();
+        gridVs.catalogMode = gridEng.catalogMode();
+        gridVs.caretX = 300;
+        gridVs.caretY = 200;
+        candWin.update(gridVs);
+        RECT gridRc{};
+        CHECK(GetWindowRect(candWin.hwnd(), &gridRc) != FALSE);
+        CHECK((gridRc.right - gridRc.left) > 450);
+        CHECK((gridRc.bottom - gridRc.top) > 300);
+        // Switch to Emoji tab and verify grid stays rendered
+        gridEng.setCatalogMode(liteime::engine::SymbolCatalogMode::Emoji);
+        gridVs.catalogMode = gridEng.catalogMode();
+        gridVs.items = gridEng.currentPageItems();
+        candWin.update(gridVs);
+        CHECK(IsWindowVisible(candWin.hwnd()) != FALSE);
+    }
+
     // Exercise persisted statusPosX/statusPosY restoration and work-area clamping
     {
         liteime::host::StatusWindow savedStatus;
