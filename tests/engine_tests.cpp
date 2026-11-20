@@ -1620,6 +1620,150 @@ int wmain() {
             CHECK(!stillPresent);
             memReloaded.handleKey(0x1B, 0, false);
         }
+
+        // First-time Quanpin mixed typing, Option A tiering, Shuangpin bugfix ("zhendema"), & Shuangpin+Quanpin mixed typing
+        {
+            std::vector<RawPhraseRecord> mixPhrases = {
+                {"说些", "shuo xie", 15000, 2},
+                {"什么", "shen me", 60000, 2},
+                {"是", "shi", 80000, 1},
+                {"上", "shang", 50000, 1},
+                {"么", "me", 12000, 1},
+                {"今天", "jin tian", 70000, 2},
+                {"天气", "tian qi", 45000, 2},
+                {"早安", "zao an", 25000, 2},
+                {"杂", "za", 4000, 1},
+                {"你好", "ni hao", 75000, 2},
+                {"怎么样", "zen me yang", 42000, 3},
+                {"我们", "wo men", 85000, 2},
+                {"的", "de", 120000, 1},
+                {"大", "da", 50000, 1},
+                {"国家", "guo jia", 65000, 2},
+                {"中国", "zhong guo", 90000, 2},
+                {"人民", "ren min", 70000, 2},
+                {"人民币", "ren min bi", 48000, 3},
+                {"不好意思", "bu hao yi si", 35000, 4},
+                {"真", "zhen", 30000, 1},
+                {"真的", "zhen de", 68000, 2},
+                {"真的吗", "zhen de ma", 55000, 3},
+                {"吗", "ma", 45000, 1},
+                {"脏", "zang", 3000, 1},
+                {"嗯", "en", 1200, 1},
+                {"喜", "xi", 9000, 1},
+                {"喜欢", "xi huan", 60000, 2},
+                {"真喜欢", "zhen xi huan", 28000, 3},
+                {"大家", "da jia", 62000, 2},
+                {"好", "hao", 70000, 1},
+                {"谢谢", "xie xie", 70000, 2},
+                {"我想", "wo xiang", 55000, 2},
+                {"西安", "xi an", 30000, 2},
+                {"先", "xian", 25000, 1},
+                {"桑", "sang", 8000, 1},
+                {"输入法", "shu ru fa", 40000, 3},
+                {"助兴", "zhu xing", 18000, 2},
+                {"实事求是", "shi shi qiu shi", 32000, 4},
+                {"死", "si", 6000, 1},
+                {"商", "shang", 5000, 1},
+                {"秋", "qiu", 4000, 1},
+                {"时", "shi", 20000, 1},
+            };
+            std::filesystem::path mixDictPath = tmpDir / "mixed_sp.dict";
+            CHECK(BinaryDict::compileToFile(mixDictPath, mixPhrases, {}));
+            BinaryDict mixDict;
+            CHECK(mixDict.loadFile(mixDictPath));
+
+            const std::filesystem::path mixUserPath = tmpDir / "mixed_user.tsv";
+            std::filesystem::remove(mixUserPath);
+
+            BilingualEngine mixEng;
+            mixEng.setDictionary(&mixDict);
+            mixEng.userDict().load(mixUserPath);
+
+            // A. First-time Quanpin mixed decoding (zero prior UserDict history)
+            auto checkFirstTop = [&](std::string_view input, std::string_view expectedText) {
+                mixEng.handleKey(0x1B, 0, false);
+                typeWord(mixEng, std::string(input));
+                auto items = mixEng.currentPageItems();
+                bool ok = !items.empty() && items[0].text == expectedText;
+                if (!ok) {
+                    std::cerr << "First-time mixed fail for [" << input << "]: got "
+                              << (items.empty() ? "<empty>" : items[0].text) << " expected " << expectedText << "\n";
+                    for (size_t idx = 0; idx < std::min<size_t>(5, items.size()); ++idx) {
+                        std::cerr << "  [" << idx << "] " << items[idx].text
+                                  << " key=" << items[idx].matchedKey
+                                  << " sc=" << items[idx].score << "\n";
+                    }
+                }
+                CHECK(ok);
+                mixEng.handleKey(0x1B, 0, false);
+            };
+            checkFirstTop("shuoxiesm", "说些什么");
+            checkFirstTop("jintiantq", "今天天气");
+            checkFirstTop("nihaozmy", "你好怎么样");
+            checkFirstTop("womendgj", "我们的国家");
+            checkFirstTop("zhongguorm", "中国人民");
+            checkFirstTop("jintianza", "今天早安");
+            checkFirstTop("renmb", "人民币");
+            checkFirstTop("zenmy", "怎么样");
+            checkFirstTop("buhaoys", "不好意思");
+            // Pure Jianpin idioms must NOT be displaced by random BuildWholeSentence guesses
+            checkFirstTop("ssqs", "实事求是");
+
+            // B. Option A: direct sentence commit records full canonical pinyin (count=1 -> tier 0, count=2 -> tier 1)
+            typeWord(mixEng, "shuoxiesm");
+            CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "说些什么");
+            auto pick1 = mixEng.handleKey(0x20, 0, false); // 1st direct pick
+            CHECK(pick1.commitText == "说些什么");
+            // Should be stored under canonical "shuo xie shen me" with count == 1, tier == 0
+            auto learned1 = mixEng.userDict().lookup("shuo xie shen me");
+            CHECK(!learned1.empty() && learned1[0].word == "说些什么" && learned1[0].count == 1 && !learned1[0].isPhrase);
+
+            typeWord(mixEng, "shuoxiesm");
+            auto pick2 = mixEng.handleKey(0x20, 0, false); // 2nd direct pick -> tier 1!
+            CHECK(pick2.commitText == "说些什么");
+            typeWord(mixEng, "sxsm");
+            CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "说些什么");
+            mixEng.handleKey(0x1B, 0, false);
+
+            // C. Shuangpin bugfixes & Shuangpin+Quanpin mixed typing
+            mixEng.config().scheme = PinyinScheme::Xiaohe;
+
+            // Screenshot regression: "zhendema" in Xiaohe must decode "真的吗" (NOT "脏嗯的吗") & clean header
+            typeWord(mixEng, "zhendema");
+            CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "真的吗");
+            CHECK(mixEng.segmentedHeader() == "zhen'de'ma");
+            mixEng.handleKey(0x1B, 0, false);
+
+            // Pure Quanpin words typed in Shuangpin mode (odd lengths & non-SP pairs) must work
+            checkFirstTop("nihao", "你好");
+            checkFirstTop("zhongguo", "中国");
+            checkFirstTop("xiexie", "谢谢");
+            checkFirstTop("woxiang", "我想");
+            checkFirstTop("dajiahao", "大家好");
+
+            // Genuine Shuangpin must stay prioritized on collisions
+            checkFirstTop("xian", "西安"); // SP xi'an > QP xian ("先")
+            checkFirstTop("nihc", "你好"); // SP ni hao
+            checkFirstTop("sh", "桑");     // SP sang
+
+            // Mixed Shuangpin + Quanpin ("vf" Xiaohe "zhen" + "xihuan" Quanpin -> "真喜欢")
+            typeWord(mixEng, "vfxihuan");
+            CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "真喜欢");
+            CHECK(mixEng.segmentedHeader() == "vf'xi'huan [zhen'xi'huan]");
+            mixEng.handleKey(0x1B, 0, false);
+
+            // Shuangpin Jianpin with apostrophes ("u'r'f" -> Xiaohe sh+r+f -> "输入法")
+            typeWord(mixEng, "u'r'f");
+            CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "输入法");
+            mixEng.handleKey(0x1B, 0, false);
+
+            // Microsoft Shuangpin ';' on odd position AFTER a 3-letter Quanpin syllable ("zhux;" -> "zhu xing")
+            mixEng.config().scheme = PinyinScheme::Microsoft;
+            typeWord(mixEng, "zhux");
+            mixEng.handleKey(0xBA, 0, false); // ';' completes xing
+            CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "助兴");
+            mixEng.handleKey(0x1B, 0, false);
+        }
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

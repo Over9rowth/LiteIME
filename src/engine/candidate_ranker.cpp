@@ -44,9 +44,11 @@ void BilingualEngine::rebuildCandidates() {
         return;
     }
 
-    // 1. Temporary v-mode or URL mode -> direct raw ASCII candidate
-    if (urlMode_ || (rawBuffer_.size() > 1 && rawBuffer_[0] == 'v')) {
-        std::string payload = (rawBuffer_[0] == 'v' && !urlMode_) ? rawBuffer_.substr(1) : rawBuffer_;
+    // 1. Temporary v-mode (Quanpin only, since 'v' is initial "zh" in Shuangpin) or URL mode -> direct raw ASCII candidate
+    const bool isVMode = (config_.scheme == PinyinScheme::Quanpin &&
+                          rawBuffer_.size() > 1 && rawBuffer_[0] == 'v');
+    if (urlMode_ || isVMode) {
+        std::string payload = (isVMode && !urlMode_) ? rawBuffer_.substr(1) : rawBuffer_;
         CandidateItem rawCi;
         rawCi.text = payload;
         rawCi.comment = urlMode_ ? "[URL]" : "[v模式]";
@@ -74,6 +76,7 @@ void BilingualEngine::rebuildCandidates() {
         CandidateItem item;
         int groupRank = 0; // higher = shown earlier
         uint32_t tier = 0; // pure user-frequency ladder tier (0, 1, 2...)
+        size_t sourcePathIdx = static_cast<size_t>(-1);
     };
     std::vector<ScoredCandidate> scored;
     std::unordered_map<std::string, size_t> seenIdx;
@@ -89,7 +92,8 @@ void BilingualEngine::rebuildCandidates() {
                          CandidateKind kind,
                          int groupRank,
                          uint32_t tier,
-                         int pinnedSlot = -1) {
+                         int pinnedSlot = -1,
+                         size_t sourcePathIdx = static_cast<size_t>(-1)) {
         if (text.empty()) return;
         if (!bigramCtxWord.empty() &&
             (kind == CandidateKind::ChinesePhrase ||
@@ -100,7 +104,8 @@ void BilingualEngine::rebuildCandidates() {
         auto it = seenIdx.find(text);
         if (it != seenIdx.end()) {
             auto& cur = scored[it->second];
-            if (groupRank > cur.groupRank || (groupRank == cur.groupRank && tier > cur.tier)) {
+            if (groupRank > cur.groupRank || (groupRank == cur.groupRank && tier > cur.tier) ||
+                (groupRank == cur.groupRank && tier == cur.tier && defaultScore > cur.item.score)) {
                 cur.item.comment = std::move(comment);
                 cur.item.matchedKey = std::move(matchedKey);
                 cur.item.consumedRawChars = consumedRawChars;
@@ -109,6 +114,7 @@ void BilingualEngine::rebuildCandidates() {
                 if (pinnedSlot >= 0) cur.item.pinnedSlot = pinnedSlot;
                 cur.groupRank = groupRank;
                 cur.tier = tier;
+                cur.sourcePathIdx = sourcePathIdx;
             }
             return;
         }
@@ -121,7 +127,7 @@ void BilingualEngine::rebuildCandidates() {
         ci.score = defaultScore;
         ci.kind = kind;
         ci.pinnedSlot = pinnedSlot;
-        scored.push_back(ScoredCandidate{std::move(ci), groupRank, tier});
+        scored.push_back(ScoredCandidate{std::move(ci), groupRank, tier, sourcePathIdx});
     };
 
     // 2. Dynamic shortcuts (rq / sj / xq)
@@ -153,44 +159,80 @@ void BilingualEngine::rebuildCandidates() {
         }
     }
 
-    // 3. Pinyin segmentation & Chinese candidates (supports Quanpin & Shuangpin)
-    auto paths = PinyinTable::segmentScheme(lowerBuf, config_.scheme, 3);
-    bool hasFullExactChinese = false;
-    bool hasFuzzyMatches = false;
-
-    if (!paths.empty() && hasAnyDict()) {
-        auto buildHeaderForPath = [this](const SegmentPath& path) {
-            std::string hdr;
-            for (size_t i = 0; i < path.tokens.size(); ++i) {
-                const auto& tok = path.tokens[i];
-                if (tok.start + tok.length <= rawBuffer_.size()) {
-                    if (i > 0) hdr.push_back('\'');
-                    hdr.append(rawBuffer_, tok.start, tok.length);
-                } else {
-                    return std::string{};
-                }
-            }
-            auto stripApos = [](std::string_view s) {
-                std::string out;
-                out.reserve(s.size());
-                for (char c : s) {
-                    if (c != '\'') out.push_back(c);
-                }
-                return out;
-            };
-            if (!hdr.empty() && stripApos(hdr) == stripApos(rawBuffer_)) {
-                if (config_.scheme != PinyinScheme::Quanpin) {
-                    std::string decoded = path.preeditDisplay();
-                    if (!decoded.empty() && decoded != hdr) {
-                        hdr += " [";
-                        hdr += decoded;
-                        hdr += "]";
+    // 3. Pinyin segmentation & Chinese candidates (supports Quanpin & Shuangpin + mixed typing)
+    auto paths = PinyinTable::segmentScheme(lowerBuf, config_.scheme, 6);
+    size_t trailingSplitIdx = static_cast<size_t>(-1);
+    if (!paths.empty() && !paths[0].tokens.empty() && config_.scheme == PinyinScheme::Quanpin) {
+        // Synthesize a trailing-initial split variant (e.g. "jintianza" -> "jin tian z a" for "今天早安")
+        const auto& lastTok = paths[0].tokens.back();
+        if (!lastTok.isPartial && lastTok.length == 2 &&
+            static_cast<size_t>(lastTok.start + 2) <= lowerBuf.size()) {
+            std::string c0(1, lowerBuf[lastTok.start]);
+            std::string c1(1, lowerBuf[lastTok.start + 1]);
+            if (PinyinTable::isValidInitial(c0) && PinyinTable::isSyllablePrefix(c1)) {
+                SegmentPath splitPath = paths[0];
+                splitPath.tokens.pop_back();
+                splitPath.tokens.push_back(SyllableToken{std::move(c0), true, lastTok.start, 1});
+                splitPath.tokens.push_back(SyllableToken{std::move(c1), true, static_cast<uint16_t>(lastTok.start + 1), 1});
+                splitPath.score -= 22;
+                const std::string splitKey = splitPath.joinedKey();
+                size_t existingIdx = static_cast<size_t>(-1);
+                for (size_t k = 0; k < paths.size(); ++k) {
+                    if (paths[k].joinedKey() == splitKey) {
+                        existingIdx = k;
+                        break;
                     }
                 }
-                return hdr;
+                if (existingIdx == static_cast<size_t>(-1)) {
+                    trailingSplitIdx = paths.size();
+                    paths.push_back(std::move(splitPath));
+                } else if (paths[existingIdx].tokens.size() >= 2) {
+                    auto& exToks = paths[existingIdx].tokens;
+                    if (exToks[exToks.size() - 2].isPartial &&
+                        !exToks.back().isPartial && exToks.back().length == 1) {
+                        exToks.back().isPartial = true;
+                        trailingSplitIdx = existingIdx;
+                    }
+                }
             }
-            return std::string{};
+        }
+    }
+    bool hasFullExactChinese = false;
+    bool hasFuzzyMatches = false;
+    auto buildHeaderForPath = [this](const SegmentPath& path) {
+        std::string hdr;
+        for (size_t i = 0; i < path.tokens.size(); ++i) {
+            const auto& tok = path.tokens[i];
+            if (tok.start + tok.length <= rawBuffer_.size()) {
+                if (i > 0) hdr.push_back('\'');
+                hdr.append(rawBuffer_, tok.start, tok.length);
+            } else {
+                return std::string{};
+            }
+        }
+        auto stripApos = [](std::string_view s) {
+            std::string out;
+            out.reserve(s.size());
+            for (char c : s) {
+                if (c != '\'') out.push_back(c);
+            }
+            return out;
         };
+        if (!hdr.empty() && stripApos(hdr) == stripApos(rawBuffer_)) {
+            if (config_.scheme != PinyinScheme::Quanpin) {
+                std::string decoded = path.preeditDisplay();
+                if (!decoded.empty() && decoded != hdr) {
+                    hdr += " [";
+                    hdr += decoded;
+                    hdr += "]";
+                }
+            }
+            return hdr;
+        }
+        return std::string{};
+    };
+
+    if (!paths.empty() && hasAnyDict()) {
         const SegmentPath& bestPath = paths[0];
         const bool hasUpper = std::any_of(rawBuffer_.begin(), rawBuffer_.end(),
                                           [](unsigned char c) { return c >= 'A' && c <= 'Z'; });
@@ -202,6 +244,9 @@ void BilingualEngine::rebuildCandidates() {
         }
         const size_t tokCount = bestPath.tokens.size();
         const std::string fullKey = bestPath.joinedKey();
+        const bool hasPureFullShuangpin = (config_.scheme != PinyinScheme::Quanpin) &&
+            std::all_of(bestPath.tokens.begin(), bestPath.tokens.end(),
+                        [](const SyllableToken& t) { return !t.isPartial && t.length == 2; });
 
         // 3a & 3b. Exact full-input Chinese phrases across top segmentation paths (groupRank = 92)
         // When alternative paths have no partial tokens and the same syllable count as paths[0]
@@ -215,9 +260,14 @@ void BilingualEngine::rebuildCandidates() {
                 })) {
                 continue;
             }
-            const double pathPenalty = (pIdx > 0 && path.tokens.size() == tokCount)
-                ? static_cast<double>(pIdx) * 2.5
-                : static_cast<double>(pIdx) * 15.0;
+            const bool isQuanpinFallbackInShuangpin = hasPureFullShuangpin && pIdx > 0 &&
+                std::any_of(path.tokens.begin(), path.tokens.end(),
+                            [](const SyllableToken& t) { return t.length >= 3; });
+            const double pathPenalty = isQuanpinFallbackInShuangpin
+                ? 30.0
+                : ((pIdx > 0 && path.tokens.size() == tokCount)
+                       ? static_cast<double>(pIdx) * 2.5
+                       : static_cast<double>(pIdx) * 15.0);
             const std::string key = path.joinedKey();
             const size_t exactLimit = (path.tokens.size() == 1) ? 120 : 24;
             auto exactHits = queryExactAll(key, exactLimit);
@@ -230,7 +280,7 @@ void BilingualEngine::rebuildCandidates() {
                     bestExactPhraseScore = effectiveScore;
                     bestExactPhrasePathIdx = pIdx;
                 }
-                addScored(h.word, "", key, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 92, tier);
+                addScored(h.word, "", key, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 92, tier, -1, pIdx);
             }
             // Also include any user-learned / promoted word for this exact full key not already in top exactHits
             for (const auto& u : userDict_.lookup(key)) {
@@ -245,7 +295,7 @@ void BilingualEngine::rebuildCandidates() {
                         bestExactPhraseScore = effectiveScore;
                         bestExactPhrasePathIdx = pIdx;
                     }
-                    addScored(u.word, "", key, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 92, tier);
+                    addScored(u.word, "", key, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 92, tier, -1, pIdx);
                 }
             }
         }
@@ -282,50 +332,86 @@ void BilingualEngine::rebuildCandidates() {
                                 [](const SyllableToken& t) { return t.text.size() <= 2; }))
                     ? CandidateKind::ChineseJianpin
                     : CandidateKind::ChinesePhrase;
-                addScored(uEntry.word, "", uKey, rawBuffer_.size(), sc, kind, rank, tier);
+                addScored(uEntry.word, "", uKey, rawBuffer_.size(), sc, kind, rank, tier, -1, pIdx);
             }
         }
 
-        // 3c. Whole-sentence Viterbi candidate when multi-syllable (all non-final tokens full syllables; groupRank = 90)
-        const bool isInProgressMultiSyllable = (tokCount >= 2) &&
-            std::all_of(bestPath.tokens.begin(), bestPath.tokens.end() - 1,
-                        [](const SyllableToken& t) { return !t.isPartial; }) &&
-            bestPath.tokens.back().isPartial &&
-            PinyinTable::isSyllablePrefix(bestPath.tokens.back().text);
-        if (tokCount >= 2 &&
-            std::all_of(bestPath.tokens.begin(), bestPath.tokens.end() - 1,
-                        [](const SyllableToken& t) { return !t.isPartial; })) {
+        // 3c. Whole-sentence Viterbi candidate across top paths (front full syllable + full/partial continuation; groupRank = 90)
+        // Require non-partial opening syllable and monotonic full->partial ordering so leading/mid typos stay intact.
+        auto hasPartialBeforeMultiCharFull = [](const SegmentPath& path) {
+            bool seenPartial = false;
+            for (const auto& t : path.tokens) {
+                if (t.isPartial) {
+                    seenPartial = true;
+                } else if (seenPartial) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (size_t pIdx = 0; pIdx < paths.size(); ++pIdx) {
+            const auto& path = paths[pIdx];
+            if (path.tokens.size() < 2 || path.tokens[0].isPartial || hasPartialBeforeMultiCharFull(path)) continue;
+
             double vScore = 0.0;
-            std::string sent = buildWholeSentence(bestPath, vScore);
-            if (!sent.empty()) {
-                uint32_t tier = userDict_.getTier(fullKey, sent);
-                addScored(sent, "", fullKey, rawBuffer_.size(), 340.0 + vScore,
-                          CandidateKind::ChineseSentence, 90, tier);
+            std::string resolvedKey;
+            std::string sent = buildWholeSentenceWithKey(path, vScore, resolvedKey);
+            if (!sent.empty() && !resolvedKey.empty()) {
+                double pathPenalty = static_cast<double>(pIdx) * 1.5;
+                if (pIdx == trailingSplitIdx) {
+                    pathPenalty = 0.25;
+                } else if (hasPureFullShuangpin && pIdx > 0) {
+                    pathPenalty = 4.0;
+                }
+                uint32_t tier = userDict_.getTier(resolvedKey, sent);
+                addScored(sent, "", resolvedKey, rawBuffer_.size(), 340.0 + vScore - pathPenalty,
+                          CandidateKind::ChineseSentence, 90, tier, -1, pIdx);
             }
         }
 
-        // 3c-prefix. Multi-syllable words matching "<full syllables> <last initial/prefix>*" (e.g. "qingn" -> 青年/请你/请您)
-        if (isInProgressMultiSyllable) {
-            const std::string initials = bestPath.initialsKey();
-            auto addMatchedMulti = [&](const DictCandidate& h) {
-                if (detail::countSyllablesInPinyin(h.pinyin) != tokCount) return;
-                if (!std::string_view(h.pinyin).starts_with(fullKey)) return;
-                uint32_t tier = userDict_.getTier(h.pinyin, h.word);
-                double sc = 280.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0;
-                addScored(h.word, "", h.pinyin, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 89, tier);
-            };
+        // 3c-mixed. Multi-syllable dictionary words matching mixed full-front/partial patterns (2..6 syllables; groupRank = 89)
+        for (size_t pIdx = 0; pIdx < std::min<size_t>(paths.size(), 3); ++pIdx) {
+            const auto& path = paths[pIdx];
+            const size_t pTokCount = path.tokens.size();
+            if (pTokCount < 2 || pTokCount > 6 || path.tokens[0].isPartial || hasPartialBeforeMultiCharFull(path)) continue;
+            const bool anyPartial = std::any_of(path.tokens.begin(), path.tokens.end(),
+                                                [](const SyllableToken& t) { return t.isPartial; });
+            const bool hasFullToken = std::any_of(path.tokens.begin(), path.tokens.end(),
+                                                  [](const SyllableToken& t) { return !t.isPartial; });
+            if (!anyPartial || !hasFullToken) continue;
+
+            const std::string initials = path.initialsKey();
+            const std::string pathKey = path.joinedKey();
+            const double pathPenalty = static_cast<double>(pIdx) * 8.0;
+            std::vector<std::pair<std::string_view, bool>> patTokens;
+            patTokens.reserve(pTokCount);
+            for (const auto& tok : path.tokens) {
+                patTokens.emplace_back(tok.text, tok.isPartial);
+            }
             for (const auto& h : queryJianpinAll(initials, 64)) {
-                addMatchedMulti(h);
+                size_t extCount = 0;
+                if (!UserDict::matchesTokenPattern(h.pinyin, patTokens, &extCount)) continue;
+                uint32_t tier = userDict_.getTier(h.pinyin, h.word);
+                double sc = 280.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0 -
+                            static_cast<double>(extCount) * 4.0 - pathPenalty;
+                addScored(h.word, "", h.pinyin, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 89, tier, -1, pIdx);
             }
-            for (const auto& h : queryPinyinPrefixAll(fullKey, 32)) {
-                addMatchedMulti(h);
+            const bool tailOnlyPartial = !path.tokens.back().isPartial ? false
+                : std::all_of(path.tokens.begin(), path.tokens.end() - 1,
+                              [](const SyllableToken& t) { return !t.isPartial; });
+            if (tailOnlyPartial) {
+                for (const auto& h : queryPinyinPrefixAll(pathKey, 32)) {
+                    size_t extCount = 0;
+                    if (!UserDict::matchesTokenPattern(h.pinyin, patTokens, &extCount)) continue;
+                    uint32_t tier = userDict_.getTier(h.pinyin, h.word);
+                    double sc = 280.0 + (detail::freqToLogScore(h.freq) + 10.0) * 5.0 - pathPenalty;
+                    addScored(h.word, "", h.pinyin, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 89, tier, -1, pIdx);
+                }
             }
-            for (const auto& [uKey, uEntry] : userDict_.lookupByInitials(initials)) {
-                if (detail::countSyllablesInPinyin(uKey) != tokCount) continue;
-                if (!std::string_view(uKey).starts_with(fullKey)) continue;
+            for (const auto& [uKey, uEntry] : userDict_.lookupByTokenPattern(patTokens)) {
                 uint32_t tier = UserDict::tierForCount(uEntry.count);
-                double sc = 280.0 + static_cast<double>(uEntry.count) * 4.0;
-                addScored(uEntry.word, "", uKey, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 89, tier);
+                double sc = 280.0 + static_cast<double>(uEntry.count) * 4.0 - pathPenalty;
+                addScored(uEntry.word, "", uKey, rawBuffer_.size(), sc, CandidateKind::ChinesePhrase, 89, tier, -1, pIdx);
             }
         }
 
@@ -456,15 +542,31 @@ void BilingualEngine::rebuildCandidates() {
                     if (pIdx == 0) {
                         std::vector<std::pair<std::string_view, bool>> prefixPat;
                         prefixPat.reserve(len);
+                        std::string subInitials;
+                        subInitials.reserve(len);
                         for (size_t k = 0; k < len; ++k) {
                             prefixPat.emplace_back(path.tokens[k].text, path.tokens[k].isPartial);
+                            if (!path.tokens[k].text.empty()) {
+                                subInitials.push_back(path.tokens[k].text[0]);
+                            }
+                        }
+                        if (!prefixAllShort && len <= 5 && subInitials.size() == len) {
+                            for (const auto& h : queryJianpinAll(subInitials, 32)) {
+                                size_t extCount = 0;
+                                if (!UserDict::matchesTokenPattern(h.pinyin, prefixPat, &extCount)) continue;
+                                uint32_t tier = userDict_.getTier(h.pinyin, h.word);
+                                double sc = 150.0 + lenBonus + (detail::freqToLogScore(h.freq) + 10.0) * 5.0 -
+                                            static_cast<double>(extCount) * 3.0;
+                                addScored(h.word, "", h.pinyin, consumedBytes, sc,
+                                          CandidateKind::ChinesePhrase, 75, tier, -1, pIdx);
+                            }
                         }
                         for (const auto& [uKey, uEntry] : userDict_.lookupByTokenPattern(prefixPat)) {
                             uint32_t tier = UserDict::tierForCount(uEntry.count);
                             if (!uEntry.isPhrase && tier == 0) continue;
                             double sc = 195.0 + lenBonus + static_cast<double>(std::min<uint32_t>(uEntry.count, 100)) * 4.0 - pathPenalty;
                             addScored(uEntry.word, "", uKey, consumedBytes, sc,
-                                      CandidateKind::ChinesePhrase, uEntry.isPhrase ? 80 : 74, tier);
+                                      CandidateKind::ChinesePhrase, uEntry.isPhrase ? 80 : 74, tier, -1, pIdx);
                         }
                     }
                 } else {
@@ -668,6 +770,19 @@ void BilingualEngine::rebuildCandidates() {
         if (a.tier != b.tier) return a.tier > b.tier;
         return a.item.score > b.item.score;
     });
+
+    // Align segmented header / inline preedit with the actual winning Chinese path
+    const bool hasUpperRaw = std::any_of(rawBuffer_.begin(), rawBuffer_.end(),
+                                         [](unsigned char c) { return c >= 'A' && c <= 'Z'; });
+    if (!hasUpperRaw && !scored.empty() && scored[0].sourcePathIdx < paths.size()) {
+        std::string topHdr = buildHeaderForPath(paths[scored[0].sourcePathIdx]);
+        if (!topHdr.empty()) {
+            segmentedHeader_ = std::move(topHdr);
+            if (!rawBuffer_.empty() && rawBuffer_.back() == '\'' && segmentedHeader_.back() != '\'') {
+                segmentedHeader_.push_back('\'');
+            }
+        }
+    }
 
     candidates_.reserve(scored.size());
     for (auto& sc : scored) {

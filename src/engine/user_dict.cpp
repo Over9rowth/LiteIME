@@ -260,43 +260,53 @@ std::vector<std::pair<std::string, UserEntry>> UserDict::lookupByInitials(std::s
     return out;
 }
 
+bool UserDict::matchesTokenPattern(
+    std::string_view pinyinKey,
+    const std::vector<std::pair<std::string_view, bool>>& patternTokens,
+    size_t* extendedPartialCount) {
+    const size_t targetCount = patternTokens.size();
+    if (targetCount < 2 || pinyinKey.empty()) return false;
+    for (const auto& t : patternTokens) {
+        if (t.first.empty()) return false;
+    }
+
+    size_t sylCount = 1;
+    for (char c : pinyinKey) {
+        if (c == ' ') ++sylCount;
+    }
+    if (sylCount != targetCount) return false;
+
+    size_t extCount = 0;
+    size_t pos = 0;
+    for (size_t idx = 0; idx < targetCount; ++idx) {
+        size_t next = pinyinKey.find(' ', pos);
+        if (next == std::string_view::npos) next = pinyinKey.size();
+        const std::string_view syl(pinyinKey.data() + pos, next - pos);
+        const std::string_view tok = patternTokens[idx].first;
+        const bool isPartial = patternTokens[idx].second;
+        if (isPartial || tok.size() == 1) {
+            if (!syl.starts_with(tok)) return false;
+            if (syl != tok) ++extCount;
+        } else if (syl != tok) {
+            return false;
+        }
+        pos = next + 1;
+    }
+
+    if (extendedPartialCount) *extendedPartialCount = extCount;
+    return true;
+}
+
 std::vector<std::pair<std::string, UserEntry>> UserDict::lookupByTokenPattern(
     const std::vector<std::pair<std::string_view, bool>>& patternTokens) const {
     std::vector<std::pair<std::string, UserEntry>> out;
-    const size_t targetCount = patternTokens.size();
-    if (targetCount < 2) return out;
+    if (patternTokens.size() < 2) return out;
     for (const auto& t : patternTokens) {
         if (t.first.empty()) return out;
     }
 
     for (const auto& [key, vec] : entries_) {
-        size_t sylCount = 1;
-        for (char c : key) {
-            if (c == ' ') ++sylCount;
-        }
-        if (sylCount != targetCount) continue;
-
-        bool match = true;
-        size_t pos = 0;
-        for (size_t idx = 0; idx < targetCount; ++idx) {
-            size_t next = key.find(' ', pos);
-            if (next == std::string::npos) next = key.size();
-            const std::string_view syl(key.data() + pos, next - pos);
-            const std::string_view tok = patternTokens[idx].first;
-            const bool isPartial = patternTokens[idx].second;
-            if (isPartial || tok.size() == 1) {
-                if (!syl.starts_with(tok)) {
-                    match = false;
-                    break;
-                }
-            } else if (syl != tok) {
-                match = false;
-                break;
-            }
-            pos = next + 1;
-        }
-
-        if (match) {
+        if (matchesTokenPattern(key, patternTokens)) {
             for (const auto& e : vec) {
                 out.emplace_back(key, e);
             }

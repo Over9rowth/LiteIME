@@ -65,6 +65,50 @@ bool isVowel(char c) {
     return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' || c == 'v';
 }
 
+struct InputChunk {
+    std::string_view sv;
+    uint16_t offset = 0;
+};
+
+std::vector<InputChunk> splitInputChunks(std::string_view input) {
+    std::vector<InputChunk> chunks;
+    size_t pos = 0;
+    while (pos < input.size()) {
+        if (input[pos] == '\'') {
+            ++pos;
+            continue;
+        }
+        size_t next = input.find('\'', pos);
+        if (next == std::string_view::npos) next = input.size();
+        if (next > pos) {
+            chunks.push_back({input.substr(pos, next - pos), static_cast<uint16_t>(pos)});
+        }
+        pos = next;
+    }
+    return chunks;
+}
+
+std::vector<SegmentPath> mergeChunkPaths(std::vector<SegmentPath> combined,
+                                         const std::vector<SegmentPath>& subPaths,
+                                         size_t maxPaths) {
+    if (subPaths.empty()) return {};
+    std::vector<SegmentPath> nextCombined;
+    for (const auto& a : combined) {
+        for (const auto& b : subPaths) {
+            SegmentPath merged = a;
+            merged.tokens.insert(merged.tokens.end(), b.tokens.begin(), b.tokens.end());
+            merged.score += b.score;
+            nextCombined.push_back(std::move(merged));
+        }
+    }
+    std::sort(nextCombined.begin(), nextCombined.end(), [](const SegmentPath& a, const SegmentPath& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.tokens.size() < b.tokens.size();
+    });
+    if (nextCombined.size() > maxPaths) nextCombined.resize(maxPaths);
+    return nextCombined;
+}
+
 } // namespace
 
 std::string SegmentPath::joinedKey() const {
@@ -147,45 +191,27 @@ std::vector<std::string_view> PinyinTable::syllablesWithPrefix(std::string_view 
 }
 
 std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t maxPaths) {
-    if (input.empty()) return {};
+    if (input.empty() || maxPaths == 0) return {};
 
-    // Split on manual apostrophe segments first, preserving positions
-    struct Chunk {
-        std::string_view sv;
-        uint16_t offset;
-    };
-    std::vector<Chunk> chunks;
-    size_t pos = 0;
-    while (pos < input.size()) {
-        if (input[pos] == '\'') {
-            ++pos;
-            continue;
-        }
-        size_t next = input.find('\'', pos);
-        if (next == std::string_view::npos) next = input.size();
-        if (next > pos) {
-            chunks.push_back({input.substr(pos, next - pos), static_cast<uint16_t>(pos)});
-        }
-        pos = next;
-    }
-
+    const auto chunks = splitInputChunks(input);
     if (chunks.empty()) return {};
 
     // Segment a single contiguous alphabetic chunk into top-K paths via DP + beam.
     auto segmentChunk = [](std::string_view sv, uint16_t baseOffset, size_t beamWidth) -> std::vector<SegmentPath> {
         const size_t n = sv.size();
+        const size_t innerBeam = std::max<size_t>(beamWidth, 6);
         std::vector<std::vector<SegmentPath>> dp(n + 1);
         dp[0].push_back(SegmentPath{{}, 0});
 
         for (size_t i = 0; i < n; ++i) {
             if (dp[i].empty()) continue;
 
-            if (dp[i].size() > beamWidth * 4) {
+            if (dp[i].size() > innerBeam * 4) {
                 std::sort(dp[i].begin(), dp[i].end(), [](const SegmentPath& a, const SegmentPath& b) {
                     if (a.score != b.score) return a.score > b.score;
                     return a.tokens.size() < b.tokens.size();
                 });
-                dp[i].resize(beamWidth * 4);
+                dp[i].resize(innerBeam * 4);
             }
 
             const size_t maxLen = std::min<size_t>(6, n - i);
@@ -259,21 +285,9 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
 
     std::vector<SegmentPath> combined = segmentChunk(chunks[0].sv, chunks[0].offset, maxPaths);
     for (size_t c = 1; c < chunks.size(); ++c) {
-        auto subPaths = segmentChunk(chunks[c].sv, chunks[c].offset, maxPaths);
-        std::vector<SegmentPath> nextCombined;
-        for (const auto& a : combined) {
-            for (const auto& b : subPaths) {
-                SegmentPath merged = a;
-                merged.tokens.insert(merged.tokens.end(), b.tokens.begin(), b.tokens.end());
-                merged.score += b.score;
-                nextCombined.push_back(std::move(merged));
-            }
-        }
-        std::sort(nextCombined.begin(), nextCombined.end(), [](const SegmentPath& a, const SegmentPath& b) {
-            return a.score > b.score;
-        });
-        if (nextCombined.size() > maxPaths) nextCombined.resize(maxPaths);
-        combined = std::move(nextCombined);
+        combined = mergeChunkPaths(std::move(combined),
+                                   segmentChunk(chunks[c].sv, chunks[c].offset, maxPaths),
+                                   maxPaths);
     }
 
     return combined;
@@ -791,89 +805,135 @@ std::vector<SegmentPath> PinyinTable::segmentScheme(std::string_view input,
     }
     if (input.empty() || maxPaths == 0) return {};
 
-    struct Chunk {
-        std::string_view sv;
-        uint16_t offset;
-    };
-    std::vector<Chunk> chunks;
-    size_t pos = 0;
-    while (pos < input.size()) {
-        if (input[pos] == '\'') {
-            ++pos;
-            continue;
-        }
-        size_t next = input.find('\'', pos);
-        if (next == std::string_view::npos) next = input.size();
-        if (next > pos) {
-            chunks.push_back({input.substr(pos, next - pos), static_cast<uint16_t>(pos)});
-        }
-        pos = next;
-    }
+    const auto chunks = splitInputChunks(input);
     if (chunks.empty()) return {};
 
-    std::vector<SegmentPath> combined;
-    combined.push_back(SegmentPath{{}, 0});
+    auto segmentSchemeChunk = [scheme](std::string_view sv, uint16_t baseOffset, size_t beamWidth) -> std::vector<SegmentPath> {
+        const size_t n = sv.size();
+        const size_t innerBeam = std::max<size_t>(beamWidth, 8);
+        std::vector<std::vector<SegmentPath>> dp(n + 1);
+        dp[0].push_back(SegmentPath{{}, 0});
 
-    for (size_t cIdx = 0; cIdx < chunks.size(); ++cIdx) {
-        const auto& chunk = chunks[cIdx];
-        const size_t n = chunk.sv.size();
-        std::vector<SegmentPath> chunkPaths;
-        chunkPaths.push_back(SegmentPath{{}, 0});
+        for (size_t i = 0; i < n; ++i) {
+            if (dp[i].empty()) continue;
 
-        size_t i = 0;
-        while (i + 1 < n) {
-            auto syls = decodeShuangpinPair(chunk.sv[i], chunk.sv[i + 1], scheme);
-            if (syls.empty()) {
-                return {};
+            if (dp[i].size() > innerBeam * 4) {
+                std::sort(dp[i].begin(), dp[i].end(), [](const SegmentPath& a, const SegmentPath& b) {
+                    if (a.score != b.score) return a.score > b.score;
+                    return a.tokens.size() < b.tokens.size();
+                });
+                dp[i].resize(innerBeam * 4);
             }
-            std::vector<SegmentPath> nextPaths;
-            for (const auto& prefix : chunkPaths) {
-                for (size_t sIdx = 0; sIdx < syls.size(); ++sIdx) {
-                    SegmentPath p = prefix;
-                    p.tokens.push_back(SyllableToken{
-                        syls[sIdx], false,
-                        static_cast<uint16_t>(chunk.offset + i), 2});
-                    p.score += 10 - static_cast<int>(sIdx);
-                    nextPaths.push_back(std::move(p));
-                    if (nextPaths.size() >= maxPaths * 2) break;
+
+            std::vector<std::string> emittedTwoChar;
+            bool matchedStep = false;
+
+            auto pushTransition = [&](size_t len, const std::string& tokText, bool isPartial, int stepScore) {
+                if (tokText.empty()) return;
+                SyllableToken tok{tokText, isPartial, static_cast<uint16_t>(baseOffset + i), static_cast<uint16_t>(len)};
+                for (const auto& prev : dp[i]) {
+                    SegmentPath nextPath = prev;
+                    nextPath.tokens.push_back(tok);
+                    nextPath.score += stepScore;
+                    dp[i + len].push_back(std::move(nextPath));
                 }
-                if (nextPaths.size() >= maxPaths * 2) break;
+            };
+
+            // 1. Native 2-char Shuangpin pair (highest priority for genuine Shuangpin keystrokes)
+            if (i + 2 <= n) {
+                auto syls = decodeShuangpinPair(sv[i], sv[i + 1], scheme);
+                for (size_t sIdx = 0; sIdx < syls.size(); ++sIdx) {
+                    matchedStep = true;
+                    emittedTwoChar.push_back(syls[sIdx]);
+                    pushTransition(2, syls[sIdx], false, 24 - static_cast<int>(sIdx) * 2);
+                }
             }
-            chunkPaths = std::move(nextPaths);
-            i += 2;
+
+            // 2. Mixed Quanpin full-syllable transitions (supports typing Quanpin words or mixing Shuangpin + Quanpin)
+            const size_t maxLen = std::min<size_t>(6, n - i);
+            for (size_t len = maxLen; len >= 1; --len) {
+                std::string_view sub = sv.substr(i, len);
+                bool hasNonAlpha = false;
+                for (char ch : sub) {
+                    if (ch < 'a' || ch > 'z') {
+                        hasNonAlpha = true;
+                        break;
+                    }
+                }
+                if (hasNonAlpha) continue;
+
+                std::string normSub = canonicalizeSyllable(sub);
+                const bool full = syllableSet().count(normSub) > 0;
+                const bool atEnd = (i + len == n);
+
+                if (full) {
+                    if (len == 2 &&
+                        std::find(emittedTwoChar.begin(), emittedTwoChar.end(), normSub) != emittedTwoChar.end()) {
+                        continue; // Already emitted as a higher-scoring native 2-char Shuangpin pair
+                    }
+                    matchedStep = true;
+                    int stepScore = 0;
+                    if (len >= 3) {
+                        stepScore = static_cast<int>(len * 10) - 6;
+                        if (i + len < n && sv[i + len] == 'g' &&
+                            (normSub.ends_with("an") || normSub.ends_with("en") || normSub.ends_with("in"))) {
+                            stepScore -= 10;
+                        }
+                    } else if (len == 2) {
+                        stepScore = 18;
+                    } else {
+                        // Single vowel ('a'/'e'/'o') inside Shuangpin mode: keep low so zero-initial pairs (aa/ee/oo) win
+                        stepScore = atEnd ? 0 : -6;
+                    }
+                    pushTransition(len, normSub, false, stepScore);
+                } else if (len == 2 && (normSub == "zh" || normSub == "ch" || normSub == "sh")) {
+                    // Partial Quanpin digraph initial when mixing Quanpin Jianpin mid-sentence
+                    pushTransition(2, normSub, true, atEnd ? -6 : -16);
+                } else if (len == 1) {
+                    // Single Shuangpin initial key ('v'->zh, 'i'->ch, 'u'->sh, or a..z) for Jianpin / mid-syllable typing
+                    std::string part = decodeShuangpinInitialKey(sv[i], scheme);
+                    if (!part.empty()) {
+                        pushTransition(1, part, true, atEnd ? -4 : -16);
+                    }
+                }
+            }
+
+            // 3. Fallback single char so invalid pairs or symbols never collapse the entire path
+            if (dp[i + 1].empty() && !matchedStep) {
+                std::string fallback = decodeShuangpinInitialKey(sv[i], scheme);
+                if (fallback.empty()) fallback = std::string(sv.substr(i, 1));
+                pushTransition(1, fallback, true, -30);
+            }
         }
 
-        if (i < n) {
-            // Allow an odd trailing initial only on the final chunk while user is mid-syllable
-            if (cIdx + 1 != chunks.size()) {
-                return {};
-            }
-            std::string part = decodeShuangpinInitialKey(chunk.sv[i], scheme);
-            if (part.empty()) return {};
-            for (auto& p : chunkPaths) {
-                p.tokens.push_back(SyllableToken{
-                    part, true,
-                    static_cast<uint16_t>(chunk.offset + i), 1});
-                p.score -= 4;
-            }
-        }
+        auto& finals = dp[n];
+        std::sort(finals.begin(), finals.end(), [](const SegmentPath& a, const SegmentPath& b) {
+            if (a.score != b.score) return a.score > b.score;
+            return a.tokens.size() < b.tokens.size();
+        });
 
-        std::vector<SegmentPath> nextCombined;
-        for (const auto& a : combined) {
-            for (const auto& b : chunkPaths) {
-                SegmentPath m = a;
-                m.tokens.insert(m.tokens.end(), b.tokens.begin(), b.tokens.end());
-                m.score += b.score;
-                nextCombined.push_back(std::move(m));
-                if (nextCombined.size() >= maxPaths) break;
+        std::vector<SegmentPath> unique;
+        std::unordered_set<std::string> seen;
+        for (auto& p : finals) {
+            std::string key = p.joinedKey();
+            if (seen.insert(key).second) {
+                unique.push_back(std::move(p));
+                if (unique.size() >= beamWidth) break;
             }
-            if (nextCombined.size() >= maxPaths) break;
         }
-        combined = std::move(nextCombined);
+        return unique;
+    };
+
+    std::vector<SegmentPath> combined = segmentSchemeChunk(chunks[0].sv, chunks[0].offset, maxPaths);
+    for (size_t c = 1; c < chunks.size(); ++c) {
+        combined = mergeChunkPaths(std::move(combined),
+                                   segmentSchemeChunk(chunks[c].sv, chunks[c].offset, maxPaths),
+                                   maxPaths);
     }
 
     std::sort(combined.begin(), combined.end(), [](const SegmentPath& a, const SegmentPath& b) {
-        return a.score > b.score;
+        if (a.score != b.score) return a.score > b.score;
+        return a.tokens.size() < b.tokens.size();
     });
     if (combined.size() > maxPaths) combined.resize(maxPaths);
     return combined;

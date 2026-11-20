@@ -103,6 +103,9 @@ private:
 
     void rebuildCandidates();
     std::string buildWholeSentence(const SegmentPath& path, double& outScore) const;
+    std::string buildWholeSentenceWithKey(const SegmentPath& path,
+                                          double& outScore,
+                                          std::string& outResolvedPinyin) const;
     double contextBigramBonus(std::string_view prevWord, std::string_view curWord) const;
     std::string mapPunctuation(uint32_t vk, bool shift) const;
     std::string highlightedCandidateText() const;

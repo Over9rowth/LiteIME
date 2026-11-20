@@ -51,6 +51,9 @@ public:
     std::vector<std::pair<std::string, UserEntry>> lookupByInitials(std::string_view initials) const;
     // Matches multi-syllable user entries against mixed full-syllable / partial-initial tokens:
     // each pair is (normalizedTokenText, isPartial).
+    static bool matchesTokenPattern(std::string_view pinyinKey,
+                                    const std::vector<std::pair<std::string_view, bool>>& patternTokens,
+                                    size_t* extendedPartialCount = nullptr);
     std::vector<std::pair<std::string, UserEntry>> lookupByTokenPattern(
         const std::vector<std::pair<std::string_view, bool>>& patternTokens) const;
     uint32_t getBoost(std::string_view pinyinKey, std::string_view word) const;

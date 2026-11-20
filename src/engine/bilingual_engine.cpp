@@ -615,15 +615,14 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             }
         }
 
-        // In Microsoft / Sogou Shuangpin, ';' serves as final "ing" on odd position of current syllable chunk
+        // In Microsoft / Sogou Shuangpin, ';' serves as final "ing" when trailing a single partial initial
         if (!urlMode_ && !shift && vk == kVkOem1 &&
             (config_.scheme == PinyinScheme::Microsoft || config_.scheme == PinyinScheme::Sogou) &&
-            !rawBuffer_.empty() && rawBuffer_.size() < 64) {
-            size_t lastSep = rawBuffer_.rfind('\'');
-            size_t chunkStart = (lastSep == std::string::npos) ? 0 : (lastSep + 1);
-            size_t chunkLen = rawBuffer_.size() - chunkStart;
-            if ((chunkLen % 2) == 1 &&
-                !PinyinTable::decodeShuangpinPair(rawBuffer_.back(), ';', config_.scheme).empty()) {
+            !rawBuffer_.empty() && rawBuffer_.size() < 64 &&
+            !PinyinTable::decodeShuangpinPair(rawBuffer_.back(), ';', config_.scheme).empty()) {
+            auto curPaths = PinyinTable::segmentScheme(detail::toLowerAscii(rawBuffer_), config_.scheme, 1);
+            if (!curPaths.empty() && !curPaths[0].tokens.empty() &&
+                curPaths[0].tokens.back().isPartial && curPaths[0].tokens.back().length == 1) {
                 if (testOnly) { res.consumed = true; return res; }
                 rawBuffer_.push_back(';');
                 rebuildCandidates();
@@ -730,7 +729,8 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         if (vk == kVkReturn) {
             if (testOnly) { res.consumed = true; return res; }
             std::string raw = committedPrefixWords_ + rawBuffer_;
-            if (raw.size() > 1 && raw[0] == 'v' && !urlMode_) {
+            if (config_.scheme == PinyinScheme::Quanpin && committedPrefixWords_.empty() &&
+                raw.size() > 1 && raw[0] == 'v' && !urlMode_) {
                 raw.erase(0, 1);
             }
             return finalizeCommit(raw);
