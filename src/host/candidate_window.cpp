@@ -435,7 +435,8 @@ void CandidateWindow::renderAndShow() {
         if (textBrush) {
             D2D1_RECT_F rTxt = D2D1::RectF(tx, itemRect.top, tx + mc.wTxt + 4.0f, itemRect.bottom);
             dcTarget_->DrawText(mc.textStr.c_str(), static_cast<UINT32>(mc.textStr.size()), textFmt_, rTxt,
-                                (isActive && activeTextBrush) ? activeTextBrush : textBrush);
+                                (isActive && activeTextBrush) ? activeTextBrush : textBrush,
+                                static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004));
         }
         tx += mc.wTxt;
 
@@ -461,7 +462,8 @@ void CandidateWindow::renderAndShow() {
         if (!mc.commentStr.empty() && comBrush) {
             tx += 5.0f;
             D2D1_RECT_F rCom = D2D1::RectF(tx, itemRect.top + 1.0f, itemRect.right - 8.0f, itemRect.bottom);
-            dcTarget_->DrawText(mc.commentStr.c_str(), static_cast<UINT32>(mc.commentStr.size()), indexFmt_, rCom, comBrush);
+            dcTarget_->DrawText(mc.commentStr.c_str(), static_cast<UINT32>(mc.commentStr.size()), indexFmt_, rCom, comBrush,
+                                static_cast<D2D1_DRAW_TEXT_OPTIONS>(0x00000004));
         }
 
         hitRegions_.push_back({itemRect, 0, static_cast<int>(i)});
@@ -622,7 +624,9 @@ LRESULT CandidateWindow::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     if (item.kind != engine::CandidateKind::QuickInput &&
                         item.kind != engine::CandidateKind::QuickInputSetup &&
                         item.kind != engine::CandidateKind::DynamicShortcut &&
-                        item.kind != engine::CandidateKind::RawInput) {
+                        item.kind != engine::CandidateKind::RawInput &&
+                        item.kind != engine::CandidateKind::SymbolMenuEntry &&
+                        item.kind != engine::CandidateKind::SymbolLiteral) {
                         POINT pt{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
                         ClientToScreen(hwnd, &pt);
                         showPinPopup(hr.index, pt);

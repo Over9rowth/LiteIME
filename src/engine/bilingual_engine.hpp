@@ -24,6 +24,17 @@ enum class CandidateKind : uint8_t {
     TypoCorrection = 8,
     QuickInput = 9,
     QuickInputSetup = 10,
+    SymbolMenuEntry = 11,
+    SymbolLiteral = 12,
+};
+
+enum class SymbolCatalogMode : uint8_t {
+    None = 0,
+    Menu = 1,
+    Kaomoji = 2,
+    Emoji = 3,
+    Greek = 4,
+    Symbols = 5,
 };
 
 struct CandidateItem {
@@ -78,7 +89,10 @@ public:
     void resetComposition();
     void notifyFocusChanged(bool gained);
 
-    bool isComposing() const { return !rawBuffer_.empty() || !committedPrefixWords_.empty(); }
+    bool isComposing() const {
+        return !rawBuffer_.empty() || !committedPrefixWords_.empty() ||
+               catalogMode_ != SymbolCatalogMode::None;
+    }
     int currentPage() const { return currentPage_; }
     int totalPages() const;
     int selectedIndexInPage() const { return selectedInPage_; }
@@ -138,6 +152,7 @@ private:
     bool doubleQuoteOpen_ = true;
     bool singleQuoteOpen_ = true;
     bool urlMode_ = false;
+    SymbolCatalogMode catalogMode_ = SymbolCatalogMode::None;
     char lastCommittedChar_ = '\0';
     int lastCommittedQuoteKind_ = 0; // 0=none, 1=double, 2=single
 };

@@ -322,17 +322,41 @@ def main() -> int:
         v3_sel = send_v3(7, 0)
         assert v3_sel[2] == 1 and v3_sel[9] > 0, f"SelectCandidate must commit non-empty UTF-8: {v3_sel[:11]}"
 
-        # 9e. One-shot phrase memory over IPC ("shuoxiesm" -> 说些 + 什么 -> "sxsm" & "shuoxiesm")
-        for ch in "SHUOXIESM":
-            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
-        assert send_ipc(pipe, 2, ord("1"), 0, 0)["is_composing"]  # "说些", remaining "sm"
-        r_mem_done = send_ipc(pipe, 2, ord("1"), 0, 0)              # "什么" -> commits "说些什么"
-        assert r_mem_done["commit"] == "说些什么", f"Expected 说些什么, got {r_mem_done!r}"
+        # 9e. First-time mixed sentence decoding + Option A recall ("shuoxiesm" -> 说些什么 -> after 2nd pick -> "sxsm")
+        for rep in range(2):
+            for ch in "SHUOXIESM":
+                assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+            r_mem = send_ipc(pipe, 2, ord("1"), 0, 0)
+            assert r_mem["commit"] == "说些什么", f"Expected direct 说些什么 on rep {rep}: {r_mem!r}"
         for recall in ("SXSM", "SHUOXIESM"):
+            r_rc = None
             for ch in recall:
                 r_rc = send_ipc(pipe, 2, ord(ch), 0, 0)
-            assert "说些什么" in r_rc["preedit"], f"Expected 说些什么 recalled on {recall}, got {r_rc!r}"
+            assert r_rc and "说些什么" in r_rc["preedit"], f"Expected 说些什么 recalled on {recall}, got {r_rc!r}"
             send_ipc(pipe, 2, 0x1B, 0, 0)
+
+        # 9f. Live 552k dict inline symbol triggers (wu->5 ⑤, dunhao->5 、, kaixin->2 😊 & 4 (*^▽^*), aerfa->5 α) & 4-tap "vvvv"
+        for ch in "WU":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("5"), 0, 0)["commit"] == "⑤"
+        for ch in "DUNHAO":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("5"), 0, 0)["commit"] == "、"
+        for ch in "KAIXIN":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("2"), 0, 0)["commit"] == "😊"
+        for ch in "KAIXIN":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("4"), 0, 0)["commit"] == "(*^▽^*)"
+        for ch in "AERFA":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("5"), 0, 0)["commit"] == "α"
+        for ch in "VVVV":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, ord("2"), 0, 0)["is_composing"]  # Enter Emoji library
+        for ch in "ZAN":
+            assert send_ipc(pipe, 2, ord(ch), 0, 0)["consumed"]
+        assert send_ipc(pipe, 2, 0x20, 0, 0)["commit"] == "👍"
 
         send_ipc(pipe, 3, focus=1)  # Restore normal desktop UI flag before section 10
 

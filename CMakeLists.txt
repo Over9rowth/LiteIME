@@ -21,6 +21,7 @@ if(NOT LITEIME_TSF_ONLY)
         src/engine/binary_dict.cpp
         src/engine/bigram_model.cpp
         src/engine/user_dict.cpp
+        src/engine/symbol_catalog.cpp
         src/engine/bilingual_engine.cpp
         src/engine/sentence_decoder.cpp
         src/engine/candidate_ranker.cpp

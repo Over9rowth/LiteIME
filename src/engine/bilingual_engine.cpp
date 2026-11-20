@@ -139,6 +139,7 @@ void BilingualEngine::resetComposition() {
     currentPage_ = 0;
     selectedInPage_ = 0;
     urlMode_ = false;
+    catalogMode_ = SymbolCatalogMode::None;
 }
 
 void BilingualEngine::notifyFocusChanged(bool gained) {
@@ -180,13 +181,17 @@ std::string BilingualEngine::highlightedCandidateText() const {
     auto page = currentPageItems();
     if (selectedInPage_ >= 0 && static_cast<size_t>(selectedInPage_) < page.size()) {
         const auto& item = page[selectedInPage_];
-        if (item.kind == CandidateKind::QuickInput || item.kind == CandidateKind::QuickInputSetup) {
+        if (item.kind == CandidateKind::QuickInput ||
+            item.kind == CandidateKind::QuickInputSetup ||
+            item.kind == CandidateKind::SymbolMenuEntry) {
             return rawBuffer_;
         }
         return item.text;
     }
     if (!candidates_.empty()) {
-        if (candidates_[0].kind == CandidateKind::QuickInput || candidates_[0].kind == CandidateKind::QuickInputSetup) {
+        if (candidates_[0].kind == CandidateKind::QuickInput ||
+            candidates_[0].kind == CandidateKind::QuickInputSetup ||
+            candidates_[0].kind == CandidateKind::SymbolMenuEntry) {
             return rawBuffer_;
         }
         return candidates_[0].text;
@@ -250,7 +255,8 @@ bool BilingualEngine::pinCandidateOnPage(int indexInPage, int slot0To4) {
     }
     const auto& item = candidates_[globalIdx];
     if (item.kind == CandidateKind::QuickInput || item.kind == CandidateKind::QuickInputSetup ||
-        item.kind == CandidateKind::DynamicShortcut || item.kind == CandidateKind::RawInput) {
+        item.kind == CandidateKind::DynamicShortcut || item.kind == CandidateKind::RawInput ||
+        item.kind == CandidateKind::SymbolMenuEntry || item.kind == CandidateKind::SymbolLiteral) {
         return false;
     }
     userDict_.setPin(rawBuffer_, slot0To4, item.text);
@@ -281,7 +287,8 @@ bool BilingualEngine::removeUserWordOnPage(int indexInPage) {
     }
     const CandidateItem item = candidates_[globalIdx];
     if (item.kind == CandidateKind::QuickInput || item.kind == CandidateKind::QuickInputSetup ||
-        item.kind == CandidateKind::DynamicShortcut || item.kind == CandidateKind::RawInput) {
+        item.kind == CandidateKind::DynamicShortcut || item.kind == CandidateKind::RawInput ||
+        item.kind == CandidateKind::SymbolMenuEntry || item.kind == CandidateKind::SymbolLiteral) {
         return false;
     }
 
@@ -394,6 +401,23 @@ KeyActionResult BilingualEngine::commitCandidateAtGlobalIndex(size_t idx) {
         res.showCandidates = false;
         res.openQuickInputDialog = true;
         return res;
+    }
+
+    if (chosen.kind == CandidateKind::SymbolMenuEntry) {
+        if (chosen.matchedKey == "kaomoji") {
+            catalogMode_ = SymbolCatalogMode::Kaomoji;
+        } else if (chosen.matchedKey == "emoji") {
+            catalogMode_ = SymbolCatalogMode::Emoji;
+        } else if (chosen.matchedKey == "greek") {
+            catalogMode_ = SymbolCatalogMode::Greek;
+        } else if (chosen.matchedKey == "symbols") {
+            catalogMode_ = SymbolCatalogMode::Symbols;
+        } else {
+            catalogMode_ = SymbolCatalogMode::Menu;
+        }
+        rawBuffer_.clear();
+        rebuildCandidates();
+        return buildComposeResult();
     }
 
     const std::string chosenCommit = chosen.commitText.empty() ? chosen.text : chosen.commitText;
@@ -585,9 +609,22 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
                 return finalizeCommit(committedPrefixWords_ + rawBuffer_ + ch);
             }
             char ch = static_cast<char>(shift ? vk : (vk - 'A' + 'a'));
+            if (catalogMode_ != SymbolCatalogMode::None) {
+                if (rawBuffer_.size() < 32) {
+                    rawBuffer_.push_back(static_cast<char>(detail::toLowerAscii(std::string_view(&ch, 1))[0]));
+                    rebuildCandidates();
+                }
+                return buildComposeResult();
+            }
             const size_t maxBuf = urlMode_ ? 128 : 64;
             if (rawBuffer_.size() < maxBuf) {
                 rawBuffer_.push_back(ch);
+                if (!urlMode_ && detail::toLowerAscii(rawBuffer_) == "vvvv") {
+                    catalogMode_ = SymbolCatalogMode::Menu;
+                    rawBuffer_.clear();
+                    rebuildCandidates();
+                    return buildComposeResult();
+                }
                 if (config_.autoUrlEnglish && isUrlTrigger(detail::toLowerAscii(rawBuffer_))) {
                     urlMode_ = true;
                 }
@@ -597,7 +634,7 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         }
 
         // Trigger URL/email mode cleanly when '.' completes "www." or '@' follows a local-part prefix
-        if (!urlMode_ && config_.autoUrlEnglish && !rawBuffer_.empty()) {
+        if (catalogMode_ == SymbolCatalogMode::None && !urlMode_ && config_.autoUrlEnglish && !rawBuffer_.empty()) {
             if (!shift && vk == kVkOemPeriod &&
                 isUrlTrigger(detail::toLowerAscii(rawBuffer_) + '.')) {
                 if (testOnly) { res.consumed = true; return res; }
@@ -616,7 +653,7 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         }
 
         // In Microsoft / Sogou Shuangpin, ';' serves as final "ing" when trailing a single partial initial
-        if (!urlMode_ && !shift && vk == kVkOem1 &&
+        if (catalogMode_ == SymbolCatalogMode::None && !urlMode_ && !shift && vk == kVkOem1 &&
             (config_.scheme == PinyinScheme::Microsoft || config_.scheme == PinyinScheme::Sogou) &&
             !rawBuffer_.empty() && rawBuffer_.size() < 64 &&
             !PinyinTable::decodeShuangpinPair(rawBuffer_.back(), ';', config_.scheme).empty()) {
@@ -631,7 +668,7 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         }
 
         // Apostrophe separator (e.g. xi'an, dan'g) or URL chars in urlMode_
-        if (vk == kVkOem7 && !shift) {
+        if (catalogMode_ == SymbolCatalogMode::None && vk == kVkOem7 && !shift) {
             if (testOnly) { res.consumed = true; return res; }
             if (!rawBuffer_.empty() && rawBuffer_.back() != '\'' && rawBuffer_.size() < 64) {
                 rawBuffer_.push_back('\'');
@@ -668,6 +705,22 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
         // Backspace
         if (vk == kVkBack) {
             if (testOnly) { res.consumed = true; return res; }
+            if (catalogMode_ != SymbolCatalogMode::None) {
+                if (!rawBuffer_.empty()) {
+                    rawBuffer_.pop_back();
+                    rebuildCandidates();
+                    return buildComposeResult();
+                }
+                if (catalogMode_ != SymbolCatalogMode::Menu) {
+                    catalogMode_ = SymbolCatalogMode::Menu;
+                    rebuildCandidates();
+                    return buildComposeResult();
+                }
+                resetComposition();
+                res.consumed = true;
+                res.showCandidates = false;
+                return res;
+            }
             if (!rawBuffer_.empty()) {
                 rawBuffer_.pop_back();
                 if (!isUrlTrigger(detail::toLowerAscii(rawBuffer_))) urlMode_ = false;
@@ -725,9 +778,13 @@ KeyActionResult BilingualEngine::handleKey(uint32_t vk, uint32_t modifiers, bool
             return res;
         }
 
-        // Enter commits raw English/ASCII buffer directly (Sogou signature feature!)
+        // Enter commits raw English/ASCII buffer directly (Sogou signature feature),
+        // or activates/commits current selection inside vvvv symbol catalog.
         if (vk == kVkReturn) {
             if (testOnly) { res.consumed = true; return res; }
+            if (catalogMode_ != SymbolCatalogMode::None && !candidates_.empty()) {
+                return selectCandidateOnPage(selectedInPage_);
+            }
             std::string raw = committedPrefixWords_ + rawBuffer_;
             if (config_.scheme == PinyinScheme::Quanpin && committedPrefixWords_.empty() &&
                 raw.size() > 1 && raw[0] == 'v' && !urlMode_) {

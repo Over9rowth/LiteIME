@@ -1764,6 +1764,157 @@ int wmain() {
             CHECK(!mixEng.currentPageItems().empty() && mixEng.currentPageItems()[0].text == "助兴");
             mixEng.handleKey(0x1B, 0, false);
         }
+
+        // Inline symbols/numbers/kaomoji/emoji/Greek + 4-tap 'vvvv' catalog & live keyword filtering
+        {
+            std::vector<RawPhraseRecord> symPhrases = {
+                {"无", "wu", 80000, 1},
+                {"五", "wu", 60000, 1},
+                {"吴", "wu", 50000, 1},
+                {"物", "wu", 45000, 1},
+                {"午", "wu", 40000, 1},
+                {"务", "wu", 35000, 1},
+                {"顿号", "dun hao", 50000, 2},
+                {"顿", "dun", 30000, 1},
+                {"敦", "dun", 20000, 1},
+                {"蹲", "dun", 10000, 1},
+                {"好", "hao", 70000, 1},
+                {"开心", "kai xin", 75000, 2},
+                {"开新", "kai xin", 35000, 2},
+                {"凯欣", "kai xin", 20000, 2},
+                {"凯信", "kai xin", 15000, 2},
+                {"阿尔法", "a er fa", 50000, 3},
+                {"阿尔", "a er", 25000, 2},
+                {"阿", "a", 30000, 1},
+                {"二", "er", 40000, 1},
+                {"发", "fa", 45000, 1},
+                {"啊", "a", 20000, 1},
+            };
+            std::filesystem::path symDictPath = tmpDir / "symbol_inline.dict";
+            CHECK(BinaryDict::compileToFile(symDictPath, symPhrases, {}));
+            BinaryDict symDict;
+            CHECK(symDict.loadFile(symDictPath));
+
+            BilingualEngine symEng;
+            symEng.setDictionary(&symDict);
+            symEng.config().pageSize = 6;
+
+            // 1. Inline 5th / 4th / 2nd slot triggers
+            typeWord(symEng, "wu");
+            auto wuItems = symEng.currentPageItems();
+            CHECK(wuItems.size() >= 5 && wuItems[4].text == "⑤");
+            auto commitWu = symEng.handleKey('5', 0, false);
+            CHECK(commitWu.consumed && commitWu.commitText == "⑤");
+
+            typeWord(symEng, "dunhao");
+            auto dhItems = symEng.currentPageItems();
+            CHECK(dhItems.size() >= 5 && dhItems[4].text == "、");
+            auto commitDh = symEng.handleKey('5', 0, false);
+            CHECK(commitDh.consumed && commitDh.commitText == "、");
+
+            typeWord(symEng, "kaixin");
+            auto kxItems = symEng.currentPageItems();
+            CHECK(kxItems.size() >= 5);
+            CHECK(kxItems[0].text == "开心");
+            CHECK(kxItems[1].text == "😊");
+            CHECK(kxItems[3].text == "(*^▽^*)");
+            symEng.handleKey(0x1B, 0, false);
+
+            typeWord(symEng, "aerfa");
+            auto afItems = symEng.currentPageItems();
+            CHECK(afItems.size() >= 5 && afItems[4].text == "α");
+            symEng.handleKey(0x1B, 0, false);
+
+            // 2. "vvvv" 4-tap menu -> enter Kaomoji (1) -> filter "kx" -> Space commit
+            typeWord(symEng, "vvvv");
+            CHECK(symEng.isComposing());
+            auto menuItems = symEng.currentPageItems();
+            CHECK(menuItems.size() == 4);
+            CHECK(menuItems[0].text == "颜文字库");
+            CHECK(menuItems[1].text == "常用表情库");
+            CHECK(menuItems[2].text == "希腊字母库");
+            CHECK(menuItems[3].text == "符号大全库");
+
+            auto enterKaomoji = symEng.handleKey('1', 0, false);
+            CHECK(enterKaomoji.consumed && enterKaomoji.commitText.empty() && enterKaomoji.showCandidates);
+            CHECK(symEng.isComposing());
+            typeWord(symEng, "kx");
+            auto kmHits = symEng.currentPageItems();
+            CHECK(!kmHits.empty() && kmHits[0].text == "(*^▽^*)");
+            auto pickKm = symEng.handleKey(0x20, 0, false);
+            CHECK(pickKm.consumed && pickKm.commitText == "(*^▽^*)" && !symEng.isComposing());
+
+            // 3. "vvvv" -> enter Emoji (2) -> filter "zan" -> Enter commit "👍"
+            typeWord(symEng, "vvvv");
+            CHECK(symEng.handleKey('2', 0, false).showCandidates);
+            typeWord(symEng, "zan");
+            auto emHits = symEng.currentPageItems();
+            CHECK(!emHits.empty() && emHits[0].text == "👍");
+            auto pickEm = symEng.handleKey(0x0D, 0, false);
+            CHECK(pickEm.consumed && pickEm.commitText == "👍" && !symEng.isComposing());
+
+            // 4. "vvvv" -> enter Greek (3) -> filter "omega" -> verify "ω" & Backspace back to Menu -> exit
+            typeWord(symEng, "vvvv");
+            CHECK(symEng.handleKey('3', 0, false).showCandidates);
+            typeWord(symEng, "omega");
+            auto grHits = symEng.currentPageItems();
+            CHECK(!grHits.empty() && grHits[0].text == "ω");
+            // Erase "omega" back to Greek root, then Backspace returns to 4-item Menu
+            for (int k = 0; k < 5; ++k) {
+                CHECK(symEng.handleKey(0x08, 0, false).showCandidates);
+            }
+            CHECK(symEng.currentPageItems().size() == 5 || symEng.currentPageItems().size() == 6); // All Greek
+            auto backToMenu = symEng.handleKey(0x08, 0, false);
+            CHECK(backToMenu.consumed && backToMenu.showCandidates);
+            CHECK(symEng.currentPageItems().size() == 4 && symEng.currentPageItems()[0].text == "颜文字库");
+            auto exitMenu = symEng.handleKey(0x08, 0, false);
+            CHECK(exitMenu.consumed && !exitMenu.showCandidates && !symEng.isComposing());
+
+            // 5. "vvvv" -> global filter without selecting sub-library ("dunhao" -> "、")
+            typeWord(symEng, "vvvv");
+            typeWord(symEng, "dunhao");
+            auto symHits = symEng.currentPageItems();
+            CHECK(!symHits.empty() && symHits[0].text == "、");
+            auto pickSym = symEng.handleKey('1', 0, false);
+            CHECK(pickSym.consumed && pickSym.commitText == "、");
+        }
+
+        // Production 552k dict end-to-end check (read-only): mixed sentence, partial-prefix non-regression, & inline symbols
+        {
+            const std::filesystem::path prodDictPath("D:/LiteIME/dist/data/liteime.dict");
+            if (std::filesystem::exists(prodDictPath)) {
+                BinaryDict prodDict;
+                CHECK(prodDict.loadFile(prodDictPath));
+                BilingualEngine prodEng;
+                prodEng.setDictionary(&prodDict);
+                prodEng.config().pageSize = 6;
+
+                typeWord(prodEng, "wozaixieyigeshurufa");
+                auto pItems = prodEng.currentPageItems();
+                CHECK(pItems.size() >= 2 && pItems[0].text == "我在写一个输入法");
+                // Selecting candidate #2 must remain partial-composing (no split gibberish like "我在洗饿一个输入法")
+                auto pPart = prodEng.handleKey('2', 0, false);
+                CHECK(pPart.consumed && pPart.commitText.empty() && prodEng.isComposing());
+                prodEng.handleKey(0x1B, 0, false);
+
+                typeWord(prodEng, "wu");
+                CHECK(prodEng.currentPageItems().size() >= 5 && prodEng.currentPageItems()[4].text == "⑤");
+                prodEng.handleKey(0x1B, 0, false);
+
+                typeWord(prodEng, "dunhao");
+                CHECK(prodEng.currentPageItems().size() >= 5 && prodEng.currentPageItems()[4].text == "、");
+                prodEng.handleKey(0x1B, 0, false);
+
+                typeWord(prodEng, "kaixin");
+                auto prodKx = prodEng.currentPageItems();
+                CHECK(prodKx.size() >= 5 && prodKx[1].text == "😊" && prodKx[3].text == "(*^▽^*)");
+                prodEng.handleKey(0x1B, 0, false);
+
+                typeWord(prodEng, "aerfa");
+                CHECK(prodEng.currentPageItems().size() >= 5 && prodEng.currentPageItems()[4].text == "α");
+                prodEng.handleKey(0x1B, 0, false);
+            }
+        }
     }
 
     std::cout << "All LiteIME engine tests passed!\n";

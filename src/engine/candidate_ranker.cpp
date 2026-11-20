@@ -1,4 +1,5 @@
 #include "engine/engine_internal.hpp"
+#include "engine/symbol_catalog.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -12,6 +13,89 @@ void BilingualEngine::rebuildCandidates() {
     segmentedHeader_ = rawBuffer_;
     currentPage_ = 0;
     selectedInPage_ = 0;
+
+    // -1. "vvvv" 4-tap Symbol / Kaomoji / Emoji / Greek browser + live keyword filter
+    if (catalogMode_ != SymbolCatalogMode::None) {
+        if (catalogMode_ == SymbolCatalogMode::Menu && rawBuffer_.empty()) {
+            segmentedHeader_ = "vvvv [符号百科 · 1~4选库或打字筛选]";
+            struct MenuRow {
+                const char* text;
+                const char* comment;
+                const char* key;
+            };
+            static constexpr MenuRow kMenus[] = {
+                {"颜文字库",   "[情绪表情 (*^▽^*)]", "kaomoji"},
+                {"常用表情库", "[Emoji 😊👍❤️]",     "emoji"},
+                {"希腊字母库", "[α-Ω 数学/物理]",     "greek"},
+                {"符号大全库", "[序号/标点/箭头]",    "symbols"},
+            };
+            for (size_t i = 0; i < std::size(kMenus); ++i) {
+                CandidateItem ci;
+                ci.text = kMenus[i].text;
+                ci.comment = kMenus[i].comment;
+                ci.matchedKey = kMenus[i].key;
+                ci.score = 1000.0 - static_cast<double>(i);
+                ci.kind = CandidateKind::SymbolMenuEntry;
+                candidates_.push_back(std::move(ci));
+            }
+            return;
+        }
+
+        SymbolLibrary targetLib = SymbolLibrary::Kaomoji;
+        bool filterByLib = true;
+        const char* libPrefix = "vvvv [全局筛选]";
+        switch (catalogMode_) {
+            case SymbolCatalogMode::Menu:
+                filterByLib = false;
+                libPrefix = "vvvv [全局筛选]";
+                break;
+            case SymbolCatalogMode::Kaomoji:
+                targetLib = SymbolLibrary::Kaomoji;
+                libPrefix = "[颜文字库]";
+                break;
+            case SymbolCatalogMode::Emoji:
+                targetLib = SymbolLibrary::Emoji;
+                libPrefix = "[常用表情库]";
+                break;
+            case SymbolCatalogMode::Greek:
+                targetLib = SymbolLibrary::Greek;
+                libPrefix = "[希腊字母库]";
+                break;
+            case SymbolCatalogMode::Symbols:
+                targetLib = SymbolLibrary::Symbol;
+                libPrefix = "[符号大全库]";
+                break;
+            default:
+                break;
+        }
+        if (rawBuffer_.empty()) {
+            segmentedHeader_ = std::string(libPrefix) + " · 打字筛选 / Backspace返回";
+        } else {
+            segmentedHeader_ = std::string(libPrefix) + " " + rawBuffer_;
+        }
+
+        const auto hits = SymbolCatalog::queryLibrary(targetLib, rawBuffer_, filterByLib);
+        for (size_t i = 0; i < hits.size(); ++i) {
+            CandidateItem ci;
+            ci.text = hits[i]->text;
+            ci.comment = hits[i]->label ? hits[i]->label : "";
+            ci.commitText = hits[i]->text;
+            ci.consumedRawChars = rawBuffer_.size();
+            ci.score = 1000.0 - static_cast<double>(i);
+            ci.kind = CandidateKind::SymbolLiteral;
+            candidates_.push_back(std::move(ci));
+        }
+        if (candidates_.empty()) {
+            CandidateItem none;
+            none.text = rawBuffer_;
+            none.comment = "[无匹配·Backspace修改]";
+            none.consumedRawChars = rawBuffer_.size();
+            none.kind = CandidateKind::RawInput;
+            none.score = 1.0;
+            candidates_.push_back(std::move(none));
+        }
+        return;
+    }
 
     if (rawBuffer_.empty()) return;
 
@@ -350,12 +434,23 @@ void BilingualEngine::rebuildCandidates() {
             return false;
         };
         for (size_t pIdx = 0; pIdx < paths.size(); ++pIdx) {
+            if (config_.scheme == PinyinScheme::Quanpin && pIdx > 0 && pIdx != trailingSplitIdx) {
+                continue; // Keep page 1 clean of noisy Quanpin split sentences (e.g. "xie"->"xi e"); keep paths[0] & trailingSplit
+            }
             const auto& path = paths[pIdx];
             if (path.tokens.size() < 2 || path.tokens[0].isPartial || hasPartialBeforeMultiCharFull(path)) continue;
 
             double vScore = 0.0;
             std::string resolvedKey;
             std::string sent = buildWholeSentenceWithKey(path, vScore, resolvedKey);
+            if (pIdx == trailingSplitIdx && !resolvedKey.empty() && !lowerBuf.empty()) {
+                // Only keep a trailing 2-char split (e.g. "za" -> "zao an") when the final vowel actually
+                // extended into a multi-letter syllable rather than appending a stray "啊/哦/鹅" ("输入法啊").
+                const std::string literalEnd = std::string(" ") + lowerBuf.back();
+                if (resolvedKey.ends_with(literalEnd)) {
+                    sent.clear();
+                }
+            }
             if (!sent.empty() && !resolvedKey.empty()) {
                 double pathPenalty = static_cast<double>(pIdx) * 1.5;
                 if (pIdx == trailingSplitIdx) {
@@ -774,8 +869,10 @@ void BilingualEngine::rebuildCandidates() {
     // Align segmented header / inline preedit with the actual winning Chinese path
     const bool hasUpperRaw = std::any_of(rawBuffer_.begin(), rawBuffer_.end(),
                                          [](unsigned char c) { return c >= 'A' && c <= 'Z'; });
+    size_t winningPathIdx = 0;
     if (!hasUpperRaw && !scored.empty() && scored[0].sourcePathIdx < paths.size()) {
-        std::string topHdr = buildHeaderForPath(paths[scored[0].sourcePathIdx]);
+        winningPathIdx = scored[0].sourcePathIdx;
+        std::string topHdr = buildHeaderForPath(paths[winningPathIdx]);
         if (!topHdr.empty()) {
             segmentedHeader_ = std::move(topHdr);
             if (!rawBuffer_.empty() && rawBuffer_.back() == '\'' && segmentedHeader_.back() != '\'') {
@@ -787,6 +884,36 @@ void BilingualEngine::rebuildCandidates() {
     candidates_.reserve(scored.size());
     for (auto& sc : scored) {
         candidates_.push_back(std::move(sc.item));
+    }
+
+    // Inline symbol / emoji / kaomoji / Greek / number sequence soft-placement (2nd / 4th / 5th slot)
+    if (!hasUpperRaw) {
+        std::string inlineKey;
+        if (config_.scheme != PinyinScheme::Quanpin && winningPathIdx < paths.size() &&
+            std::none_of(paths[winningPathIdx].tokens.begin(), paths[winningPathIdx].tokens.end(),
+                         [](const SyllableToken& t) { return t.isPartial; })) {
+            inlineKey = detail::formatPinyinConcat(paths[winningPathIdx].joinedKey());
+        } else {
+            inlineKey.reserve(lowerBuf.size());
+            for (char c : lowerBuf) {
+                if (c != '\'') inlineKey.push_back(c);
+            }
+        }
+        const auto symHits = SymbolCatalog::matchInline(inlineKey);
+        for (const auto& hit : symHits) {
+            bool alreadyPresent = std::any_of(candidates_.begin(), candidates_.end(), [&](const CandidateItem& c) {
+                return c.text == hit.entry->text;
+            });
+            if (alreadyPresent) continue;
+            CandidateItem sci;
+            sci.text = hit.entry->text;
+            sci.commitText = hit.entry->text;
+            sci.consumedRawChars = rawBuffer_.size();
+            sci.kind = CandidateKind::SymbolLiteral;
+            sci.score = 100.0;
+            size_t pos = std::min<size_t>(static_cast<size_t>(std::max(0, hit.preferredSlot)), candidates_.size());
+            candidates_.insert(candidates_.begin() + static_cast<std::ptrdiff_t>(pos), std::move(sci));
+        }
     }
 
     // Keep top common/user English candidate visible on Page 1 even when Chinese homophones share the spelling (e.g. "you", "can", "hel")
