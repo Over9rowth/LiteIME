@@ -22,6 +22,7 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
@@ -84,11 +85,15 @@ struct HostApp {
             }
         }
 
-        wchar_t appData[MAX_PATH]{};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData))) {
-            userDictPath = fs::path(appData) / "LiteIME" / "user_dict.tsv";
+        if (const wchar_t* envDataDir = _wgetenv(L"LITEIME_DATA_DIR"); envDataDir && *envDataDir) {
+            userDictPath = fs::path(envDataDir) / "user_dict.tsv";
         } else {
-            userDictPath = exeDir / "user_dict.tsv";
+            wchar_t appData[MAX_PATH]{};
+            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData))) {
+                userDictPath = fs::path(appData) / "LiteIME" / "user_dict.tsv";
+            } else {
+                userDictPath = exeDir / "user_dict.tsv";
+            }
         }
         customDictsDir = userDictPath.parent_path() / "dicts";
 
@@ -942,7 +947,11 @@ void enablePerMonitorDpi() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\LiteIMEHost_SingleInstance");
+    std::wstring mutexName = L"Local\\LiteIMEHost_SingleInstance";
+    if (const wchar_t* envSfx = _wgetenv(L"LITEIME_PIPE_SUFFIX"); envSfx && *envSfx) {
+        mutexName += envSfx;
+    }
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
     if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (mutex) CloseHandle(mutex);
         return 0;

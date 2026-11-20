@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <sddl.h>
 #include <string>
 
@@ -25,13 +26,21 @@ void cancelSyncIoForThread(HANDLE hThread) {
 std::wstring makePipeName() {
     DWORD sessionId = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
-    return ipc::makePipeName(sessionId);
+    std::wstring name = ipc::makePipeName(sessionId);
+    if (const wchar_t* sfx = _wgetenv(L"LITEIME_PIPE_SUFFIX"); sfx && *sfx) {
+        name += sfx;
+    }
+    return name;
 }
 
 std::wstring makeNotifyPipeName() {
     DWORD sessionId = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
-    return ipc::makeNotifyPipeName(sessionId);
+    std::wstring name = ipc::makeNotifyPipeName(sessionId);
+    if (const wchar_t* sfx = _wgetenv(L"LITEIME_PIPE_SUFFIX"); sfx && *sfx) {
+        name += sfx;
+    }
+    return name;
 }
 
 std::wstring queryCurrentUserSidString() {

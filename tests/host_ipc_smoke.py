@@ -2,9 +2,11 @@ import ctypes
 import ctypes.wintypes as wt
 import os
 import pathlib
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -81,17 +83,13 @@ def send_ipc(pipe, msg_type: int, vk: int = 0, mods: int = 0, key_up: int = 0, f
 
 
 def main() -> int:
-    user_dict = pathlib.Path(os.environ.get("APPDATA", "")) / "LiteIME" / "user_dict.tsv"
-    saved_user_dict = user_dict.read_bytes() if user_dict.exists() else None
-    pins_tsv = user_dict.parent / "pins.tsv"
-    saved_pins_tsv = pins_tsv.read_bytes() if pins_tsv.exists() else None
-    bigram_tsv = user_dict.parent / "user_bigram.tsv"
-    saved_bigram_tsv = bigram_tsv.read_bytes() if bigram_tsv.exists() else None
-    quick_tsv = user_dict.parent / "quick_input.tsv"
-    saved_quick_tsv = quick_tsv.read_bytes() if quick_tsv.exists() else None
-    config_ini = user_dict.parent / "config.ini"
-    saved_config_ini = config_ini.read_bytes() if config_ini.exists() else None
-    config_ini.parent.mkdir(parents=True, exist_ok=True)
+    smoke_dir = pathlib.Path(tempfile.mkdtemp(prefix="liteime_ipc_smoke_"))
+    user_dict = smoke_dir / "user_dict.tsv"
+    pins_tsv = smoke_dir / "pins.tsv"
+    bigram_tsv = smoke_dir / "user_bigram.tsv"
+    quick_tsv = smoke_dir / "quick_input.tsv"
+    config_ini = smoke_dir / "config.ini"
+
     user_dict.write_text("# LiteIME Smoke Clean User Dict\n", encoding="utf-8")
     pins_tsv.write_text("# LiteIME Smoke Clean Pins\n", encoding="utf-8")
     bigram_tsv.write_text("# LiteIME Smoke Clean Bigram\n", encoding="utf-8")
@@ -108,12 +106,13 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    # Ensure clean start (and wait briefly for terminated process cleanup)
-    subprocess.run(["taskkill", "/F", "/IM", "LiteIMEHost.exe"], capture_output=True)
-    time.sleep(0.15)
-    proc = subprocess.Popen([str(HOST_EXE)], cwd=str(HOST_EXE.parent))
+    smoke_suffix = f"_smoke_{os.getpid()}"
+    env = os.environ.copy()
+    env["LITEIME_DATA_DIR"] = str(smoke_dir)
+    env["LITEIME_PIPE_SUFFIX"] = smoke_suffix
+    proc = subprocess.Popen([str(HOST_EXE)], cwd=str(HOST_EXE.parent), env=env)
     try:
-        pipe_name = f"\\\\.\\pipe\\LiteIME_Host_{get_session_id()}"
+        pipe_name = f"\\\\.\\pipe\\LiteIME_Host_{get_session_id()}{smoke_suffix}"
         pipe = INVALID_HANDLE_VALUE
         for _ in range(40):
             pipe = kernel32.CreateFileW(
@@ -129,10 +128,30 @@ def main() -> int:
 
         # 1. Ping (must NOT show StatusPill yet), then FocusChanged(1) (must show StatusPill)
         u32 = ctypes.WinDLL("user32", use_last_error=True)
-        u32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
-        u32.FindWindowW.restype = wt.HWND
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        u32.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
+        u32.EnumWindows.restype = wt.BOOL
+        u32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+        u32.GetClassNameW.restype = ctypes.c_int
+        u32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+        u32.GetWindowThreadProcessId.restype = wt.DWORD
         u32.IsWindowVisible.argtypes = [wt.HWND]
         u32.IsWindowVisible.restype = wt.BOOL
+
+        def find_proc_window(cls_name: str):
+            found = [None]
+            buf = ctypes.create_unicode_buffer(128)
+            pid = wt.DWORD()
+            def cb(hwnd, _lp):
+                u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value == proc.pid:
+                    u32.GetClassNameW(hwnd, buf, 128)
+                    if buf.value == cls_name:
+                        found[0] = hwnd
+                        return False
+                return True
+            u32.EnumWindows(WNDENUMPROC(cb), 0)
+            return found[0]
 
         def wait_visible(hwnd, expected: bool, timeout: float = 0.5) -> bool:
             deadline = time.perf_counter() + timeout
@@ -144,7 +163,7 @@ def main() -> int:
 
         status_hwnd = None
         for _ in range(30):
-            status_hwnd = u32.FindWindowW("LiteIME_StatusPill", None)
+            status_hwnd = find_proc_window("LiteIME_StatusPill")
             if status_hwnd:
                 break
             time.sleep(0.02)
@@ -168,7 +187,7 @@ def main() -> int:
             assert not r_up_ev["consumed"]
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         assert r["preedit"] == "你好", f"Unexpected preedit for nihao: {r['preedit']}"
-        cand_hwnd = u32.FindWindowW("LiteIME_CandidateWindow", None)
+        cand_hwnd = find_proc_window("LiteIME_CandidateWindow")
         assert cand_hwnd and wait_visible(cand_hwnd, True), "CandidateWindow must stay visible after key release!"
 
         # 2b. Secondary background pipe losing focus must NOT clobber active pipe's StatusPill or CandidateWindow
@@ -423,29 +442,7 @@ def main() -> int:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if saved_user_dict is not None:
-            user_dict.parent.mkdir(parents=True, exist_ok=True)
-            user_dict.write_bytes(saved_user_dict)
-        elif user_dict.exists():
-            user_dict.unlink()
-        if saved_pins_tsv is not None:
-            pins_tsv.write_bytes(saved_pins_tsv)
-        elif pins_tsv.exists():
-            pins_tsv.unlink()
-        if saved_bigram_tsv is not None:
-            bigram_tsv.write_bytes(saved_bigram_tsv)
-        elif bigram_tsv.exists():
-            bigram_tsv.unlink()
-        if saved_config_ini is not None:
-            config_ini.parent.mkdir(parents=True, exist_ok=True)
-            config_ini.write_bytes(saved_config_ini)
-        elif config_ini.exists():
-            config_ini.unlink()
-        if saved_quick_tsv is not None:
-            quick_tsv.parent.mkdir(parents=True, exist_ok=True)
-            quick_tsv.write_bytes(saved_quick_tsv)
-        elif quick_tsv.exists():
-            quick_tsv.unlink()
+        shutil.rmtree(smoke_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
