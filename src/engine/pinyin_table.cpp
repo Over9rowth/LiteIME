@@ -199,7 +199,7 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
     // Segment a single contiguous alphabetic chunk into top-K paths via DP + beam.
     auto segmentChunk = [](std::string_view sv, uint16_t baseOffset, size_t beamWidth) -> std::vector<SegmentPath> {
         const size_t n = sv.size();
-        const size_t innerBeam = std::max<size_t>(beamWidth, 6);
+        const size_t innerBeam = std::max<size_t>(beamWidth, 8);
         std::vector<std::vector<SegmentPath>> dp(n + 1);
         dp[0].push_back(SegmentPath{{}, 0});
 
@@ -227,14 +227,23 @@ std::vector<SegmentPath> PinyinTable::segment(std::string_view input, size_t max
                 if (!full && !partialInitial) continue;
                 if (full) matchedFull = true;
 
-                // Score heuristic: strongly prefer fewer, full syllables; discourage 1-letter vowels unless necessary
+                // Score heuristic: strongly prefer fewer, full syllables; discourage 1-letter / mid-word zero-initial vowels unless necessary
                 int stepScore = 0;
                 if (full) {
                     stepScore = static_cast<int>(len * 14) - 8;
-                    if (len == 1 && isVowel(sub[0])) stepScore -= 6;
-                    // Lookahead penalty if splitting leaves an awkward consonant-less orphan when longer exists
-                    if (i + len < n && sv[i + len] == 'g' && (normSub.ends_with("an") || normSub.ends_with("en") || normSub.ends_with("in"))) {
-                        stepScore -= 10;
+                    if (isVowel(sub[0])) {
+                        if (len == 1) stepScore -= 6;
+                        if (i > 0) stepScore -= (len == 1 ? 4 : 5);
+                    }
+                    // Lookahead penalty only when 'g' after an/en/in cannot start a valid g* syllable (ga/ge/go/gu)
+                    if (i + len < n && sv[i + len] == 'g' &&
+                        (normSub.ends_with("an") || normSub.ends_with("en") || normSub.ends_with("in"))) {
+                        const bool canFormGe = (i + len + 1 < n) &&
+                            (sv[i + len + 1] == 'a' || sv[i + len + 1] == 'e' ||
+                             sv[i + len + 1] == 'o' || sv[i + len + 1] == 'u');
+                        if (!canFormGe) {
+                            stepScore -= 10;
+                        }
                     }
                 } else {
                     // Partial/initial token (jianpin or typing in progress)

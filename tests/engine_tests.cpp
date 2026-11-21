@@ -1937,7 +1937,75 @@ int wmain() {
                 typeWord(prodEng, "aerfa");
                 CHECK(prodEng.currentPageItems().size() >= 5 && prodEng.currentPageItems()[4].text == "α");
                 prodEng.handleKey(0x1B, 0, false);
+
+                // Nasal n/ng + g+vowel boundary segmentation & equal-length multi-path Viterbi
+                struct ProdSegCase { const char* raw; const char* top1; const char* header; };
+                const ProdSegCase segCases[] = {
+                    {"kangeren", "看个人", "kan'ge'ren"},
+                    {"bangeren", "半个人", "ban'ge'ren"},
+                    {"dange",    "单个",   "dan'ge"},
+                    {"dangao",   "蛋糕",   "dan'gao"},
+                    {"fangan",   "方案",   "fang'an"},
+                    {"pingan",   "平安",   "ping'an"},
+                };
+                for (const auto& sc : segCases) {
+                    typeWord(prodEng, sc.raw);
+                    auto scItems = prodEng.currentPageItems();
+                    CHECK(!scItems.empty() && scItems[0].text == sc.top1);
+                    CHECK(prodEng.formattedHeader() == sc.header);
+                    prodEng.handleKey(0x1B, 0, false);
+                }
             }
+        }
+
+        // Synthetic unit test: n/ng + g+vowel boundary & equal-length Viterbi filtering of weak split sentences
+        {
+            std::vector<RawPhraseRecord> boundaryPhrases = {
+                {"看",     "kan",     60000, 1},
+                {"个人",   "ge ren",  55000, 2},
+                {"抗",     "kang",    25000, 1},
+                {"而",     "er",      40000, 1},
+                {"嗯",     "en",       5000, 1},
+                {"单个",   "dan ge",  45000, 2},
+                {"蛋糕",   "dan gao", 50000, 2},
+                {"方案",   "fang an", 50000, 2},
+                {"反感",   "fan gan",  3000, 2},
+            };
+            auto bFile = tmpDir / "boundary_test.dict";
+            CHECK(BinaryDict::compileToFile(bFile, boundaryPhrases, {}));
+            BinaryDict bDict;
+            CHECK(bDict.loadFile(bFile));
+            BilingualEngine bEng;
+            bEng.setDictionary(&bDict);
+            bEng.config().pageSize = 6;
+
+            auto segKan = PinyinTable::segment("kangeren");
+            CHECK(!segKan.empty() && segKan[0].joinedKey() == "kan ge ren");
+            auto segXian = PinyinTable::segment("xian");
+            CHECK(!segXian.empty() && segXian[0].joinedKey() == "xian");
+
+            typeWord(bEng, "kangeren");
+            auto bItems = bEng.currentPageItems();
+            CHECK(!bItems.empty() && bItems[0].text == "看个人");
+            CHECK(bEng.formattedHeader() == "kan'ge'ren");
+            // Far weaker split sentence "抗而嗯" must not pollute page 1
+            for (const auto& item : bItems) {
+                CHECK(item.text != "抗而嗯");
+            }
+            bEng.handleKey(0x1B, 0, false);
+
+            typeWord(bEng, "dange");
+            CHECK(!bEng.currentPageItems().empty() && bEng.currentPageItems()[0].text == "单个");
+            bEng.handleKey(0x1B, 0, false);
+
+            typeWord(bEng, "dangao");
+            CHECK(!bEng.currentPageItems().empty() && bEng.currentPageItems()[0].text == "蛋糕");
+            bEng.handleKey(0x1B, 0, false);
+
+            typeWord(bEng, "fangan");
+            CHECK(!bEng.currentPageItems().empty() && bEng.currentPageItems()[0].text == "方案");
+            CHECK(bEng.formattedHeader() == "fang'an");
+            bEng.handleKey(0x1B, 0, false);
         }
     }
 
