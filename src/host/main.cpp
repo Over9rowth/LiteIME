@@ -993,9 +993,46 @@ void enablePerMonitorDpi() {
     }
 }
 
+bool isSafeInteractiveUserDesktop() {
+    HANDLE hToken = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        DWORD len = 0;
+        GetTokenInformation(hToken, TokenUser, nullptr, 0, &len);
+        if (len > 0) {
+            std::vector<uint8_t> buf(len);
+            if (GetTokenInformation(hToken, TokenUser, buf.data(), len, &len)) {
+                auto* tu = reinterpret_cast<PTOKEN_USER>(buf.data());
+                if (IsWellKnownSid(tu->User.Sid, WinLocalSystemSid) ||
+                    IsWellKnownSid(tu->User.Sid, WinLocalServiceSid) ||
+                    IsWellKnownSid(tu->User.Sid, WinNetworkServiceSid)) {
+                    CloseHandle(hToken);
+                    return false;
+                }
+            }
+        }
+        CloseHandle(hToken);
+    }
+
+    if (HDESK hDesk = GetThreadDesktop(GetCurrentThreadId())) {
+        wchar_t deskName[128]{};
+        DWORD needed = 0;
+        if (GetUserObjectInformationW(hDesk, UOI_NAME, deskName, sizeof(deskName), &needed)) {
+            if (_wcsicmp(deskName, L"Winlogon") == 0 ||
+                _wcsicmp(deskName, L"Disconnect") == 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    if (!isSafeInteractiveUserDesktop()) {
+        return 0;
+    }
+
     std::wstring mutexName = L"Local\\LiteIMEHost_SingleInstance";
     if (const wchar_t* envSfx = _wgetenv(L"LITEIME_PIPE_SUFFIX"); envSfx && *envSfx) {
         mutexName += envSfx;

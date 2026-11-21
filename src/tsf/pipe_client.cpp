@@ -2,8 +2,47 @@
 #include "tsf/tsf_compat.hpp"
 
 #include <cstring>
+#include <cwchar>
+#include <vector>
 
 namespace liteime::tsf {
+
+namespace {
+
+bool isSafeInteractiveUserDesktop() {
+    HANDLE hToken = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        DWORD len = 0;
+        GetTokenInformation(hToken, TokenUser, nullptr, 0, &len);
+        if (len > 0) {
+            std::vector<uint8_t> buf(len);
+            if (GetTokenInformation(hToken, TokenUser, buf.data(), len, &len)) {
+                auto* tu = reinterpret_cast<PTOKEN_USER>(buf.data());
+                if (IsWellKnownSid(tu->User.Sid, WinLocalSystemSid) ||
+                    IsWellKnownSid(tu->User.Sid, WinLocalServiceSid) ||
+                    IsWellKnownSid(tu->User.Sid, WinNetworkServiceSid)) {
+                    CloseHandle(hToken);
+                    return false;
+                }
+            }
+        }
+        CloseHandle(hToken);
+    }
+
+    if (HDESK hDesk = GetThreadDesktop(GetCurrentThreadId())) {
+        wchar_t deskName[128]{};
+        DWORD needed = 0;
+        if (GetUserObjectInformationW(hDesk, UOI_NAME, deskName, sizeof(deskName), &needed)) {
+            if (_wcsicmp(deskName, L"Winlogon") == 0 ||
+                _wcsicmp(deskName, L"Disconnect") == 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
 
 PipeClient::~PipeClient() {
     stopNotify();
@@ -42,6 +81,10 @@ void PipeClient::stopNotify() {
 }
 
 void PipeClient::notifyLoop() {
+    if (!isSafeInteractiveUserDesktop()) {
+        return;
+    }
+
     HANDLE stopEvt = static_cast<HANDLE>(notifyStopEvent_);
     HANDLE ioEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!ioEvt || !stopEvt) {
@@ -152,6 +195,10 @@ std::wstring PipeClient::pipeName() const {
 }
 
 void PipeClient::tryLaunchHost() {
+    if (!isSafeInteractiveUserDesktop()) {
+        return;
+    }
+
     uint64_t now = GetTickCount64();
     if (now - lastLaunchAttemptMs_ < 3000) return;
     lastLaunchAttemptMs_ = now;
@@ -178,6 +225,10 @@ void PipeClient::tryLaunchHost() {
 }
 
 bool PipeClient::ensureConnected() {
+    if (!isSafeInteractiveUserDesktop()) {
+        return false;
+    }
+
     if (pipeHandle_ && pipeHandle_ != INVALID_HANDLE_VALUE) {
         return true;
     }

@@ -193,6 +193,7 @@ Section "LiteIME 核心组件 (必选)" SecMain
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKLM "${UNINST_REG_KEY}" "EstimatedSize" "$0"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "LiteIMEHost" '"$INSTDIR\LiteIMEHost.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -242,4 +243,5 @@ Section "Uninstall"
 
   DeleteRegKey HKLM "${UNINST_REG_KEY}"
   DeleteRegKey HKLM "Software\LiteIME"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "LiteIMEHost"
 SectionEnd
